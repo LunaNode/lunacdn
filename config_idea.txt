@@ -1,0 +1,36 @@
+# set to true if this node should store files permanently
+# you should run at least one node with nodelete, to act as the permanent store
+mode_nodelete = false
+
+# true if we should serve file downloads
+# this may be set to false if we want permanent stores to not serve downloads
+mode_serve = true
+
+# TCP port numbers to bind for HTTP/backend communication
+http_bind = 127.0.0.1:8080
+backend_bind = 0.0.0.0:9090
+
+# comma-separated list of backend servers that we can communicate with (optional :port, defaults to port setting above)
+backend_list = 1.1.1.1,1.1.1.2,1.1.1.3:9091
+
+# megabytes for in-memory cache
+cache_memory = 128
+
+# gigabytes for on-disk cache (ignored if mode_nodelete = true)
+cache_disk = 5
+
+
+
+# future settings:
+
+# whether to discover additional backend servers
+enable_discovery = false
+
+# whether to try and redirect connections to better backends
+# each backend must have my_location set
+enable_redirect = false
+
+# URL prefix for this backend, used for redirects (e.g. https://1.1.1.1:8080/)
+my_location =
+
+# see https://github.com/valyala/ybc/tree/master/apps/go/cdn-booster for ideas and possible libraries to use for cache
