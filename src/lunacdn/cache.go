@@ -1,5 +1,10 @@
 package lunacdn
 
+/*
+cache.go: caches blocks on disk and in memory, and serves to peers and downloaders
+On cache miss, we try to serve the block from a peer via PeerList instance.
+*/
+
 import "sync"
 import "time"
 import "crypto/md5"

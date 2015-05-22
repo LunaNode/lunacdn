@@ -4,6 +4,7 @@ import "encoding/binary"
 import "bytes"
 import "net"
 
+// extract a zero-byte-terminated string from the byte buffer
 func protocolReadString(buf *bytes.Buffer) string {
 	strBytes := make([]byte, 0)
 	for {
@@ -97,8 +98,9 @@ func protocolReadDownload(buf *bytes.Buffer) (int64, string, int) {
 	return downloadId, fileHash, int(blockIndex)
 }
 
-var fakeLength uint16
+var fakeLength uint16 // placeholder for length
 
+// sets the second uint16 in a packet to the length of the packet
 func protocolAssignLength(buf *bytes.Buffer) {
 	binary.BigEndian.PutUint16(buf.Bytes()[2:4], uint16(buf.Len()))
 }

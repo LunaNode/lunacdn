@@ -25,10 +25,12 @@ func MakeServe(cfg *Config, cache *Cache) *Serve {
 }
 
 func (this *Serve) Handler(w http.ResponseWriter, r *http.Request) {
+	// convert from path like "/file" to "file"
 	path := r.URL.Path
 	shortPath := path[1 : len(path)]
 	pathParts := strings.Split(shortPath, "/")
 
+	// grab the CacheFile object for reading
 	file := this.cache.DownloadInit(shortPath)
 	if file == nil {
 		this.NotFound(w)
@@ -36,6 +38,8 @@ func (this *Serve) Handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// the file seems to exist, so let's try to read it block by block
+	// we write each block to the HTTP connection as we retrieve it
 	Log.Debug.Printf("Request for [%s]: in progress", shortPath)
 	blockIndex := 0
 

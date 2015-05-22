@@ -1,5 +1,34 @@
 package lunacdn
 
+/*
+peer.go: handles backend communication
+
+Initially, we only have the set of backends listed in configuration.
+Based on that, we create two maps:
+ - set of authorized IP addresses
+ - set of peers that we should discover
+
+We want to maintain a single connection with each peer. This is complicated by the fact that
+ peers are also trying to make connections with us. To handle this, we have an additional map
+ of peer instances identified by a session-unique peer ID; these instances include a connection
+ pointer which is updated atomically.
+
+Every now and then, we connect to the peers that we should discover; meanwhile we also accept
+ remote connections. Upon a successful incoming or outgoing connection, we perform a HELLO
+ exchange, where we send our peer ID and look for the remote peer ID. If these match, then we
+ detect loop connection and terminate. Otherwise, if we haven't seen the peer ID before, we
+ register the new peer, or if we have seen it before, we make sure we're the only connection.
+
+If the connection disconnects, then we keep the peer instance registered but set the connection
+ pointer to nil. We will try to reconnect every now and then.
+
+A problem arises if we receive an incoming connection from a new peer ID: we do not know the
+ address/port that the remote peer is listening on. In this case, we terminate the connection
+ under the assumption that we will eventually make an outgoing connection to the peer. If that
+ assumption holds, then this is fine since eventually both ends will have initiated connections
+ to each other and thus associated the other's peer ID with the address/port from backend list.
+*/
+
 import "net"
 import "sync"
 import "time"
@@ -10,10 +39,19 @@ import "bytes"
 
 /*
 Synchronization strategy
-- Lock this.mu before peer.mu
-- Never call cache when we have the lock
+- Lock this.mu before peer.mu; peer.mu locked to edit peer.conn and other fields
+- Never call cache when we have the lock (since cache will call us synchronously)
+- We maintain at most one handleConnection call per peer by synchronizing on peer.conn
 */
 
+/*
+ * A pending download, we are trying to retrieve a block from the remote end
+ * Id: identifier for this download in exchanged packets (multiple downloads may be happening concurrently)
+ * NotifyChannel: where to send bool once the download completes
+ * Bytes: retrieved bytes so far
+ * Length: total expected length
+ * StartTime: time.Now() when download initialized
+ */
 type PeerDownload struct {
 	Id int64
 	NotifyChannel chan bool
@@ -22,13 +60,21 @@ type PeerDownload struct {
 	StartTime time.Time
 }
 
+/*
+ * Identifies a block by file and block index.
+ */
 type PeerBlock struct {
 	FileHash string
 	Index int
 }
 
+/*
+ * A connection with remote peer.
+ * Peer ID is a unique session identifier for the peer. We exchange peer ID's during
+ *  HELLO protocol. Peers are registered whenever a new peer ID is seen.
+ */
 type Peer struct {
-	addr string
+	addr string // "address:port" string
 	mu sync.Mutex // used for updating fields and sending data; receiving data is done outside the lock
 	conn *net.TCPConn
 	lastConnectTime time.Time
@@ -387,6 +433,9 @@ func (this *PeerList) handleDownload(peer *Peer, downloadId int64, fileHash stri
 	}()
 }
 
+/*
+ * Request peerBlock from peer for download, and insert a pending download object for it.
+ */
 func (this *PeerList) startDownload(peer *Peer, peerBlock PeerBlock) *PeerDownload {
 	peer.mu.Lock()
 	defer peer.mu.Unlock()
@@ -420,6 +469,9 @@ func (this *PeerList) startDownload(peer *Peer, peerBlock PeerBlock) *PeerDownlo
 	}
 }
 
+/*
+ * Cancel a pending download with peer, and notify the remote end.
+ */
 func (this *PeerList) cancelDownload(peer *Peer, downloadId int64) {
 	peer.mu.Lock()
 	defer peer.mu.Unlock()
@@ -427,6 +479,9 @@ func (this *PeerList) cancelDownload(peer *Peer, downloadId int64) {
 	peer.conn.Write(protocolSendDownloadCancel(downloadId).Bytes())
 }
 
+/*
+ * Local request (from cache) to retrieve a block from peers.
+ */
 func (this *PeerList) DownloadBlock(fileHash string, blockIndex int, timeout time.Duration) []byte {
 	peerBlock := PeerBlock{FileHash: fileHash, Index: blockIndex}
 	startTime := time.Now()
@@ -456,6 +511,10 @@ func (this *PeerList) DownloadBlock(fileHash string, blockIndex int, timeout tim
 	return nil
 }
 
+/*
+ * Returns a peer who has announced the block, or nil if no such peer exists.
+ * We prefer peers that have higher download speeds.
+ */
 func (this *PeerList) findPeerWithBlock(peerBlock PeerBlock) *Peer {
 	// we first identify the set of peers that have the block available
 	//  (both connected and announced block recently)
@@ -533,6 +592,8 @@ func (this *PeerList) refreshPeer(peer *Peer) {
 	peer.mu.Lock()
 	defer peer.mu.Unlock()
 
+	// try to connect to the peer if CONNECT_INTERVAL seconds has elapsed
+	// note that updating peer.conn is done in handleConnection, and only after the HELLO exchange succeeds
 	if peer.conn == nil && time.Now().After(peer.lastConnectTime.Add(CONNECT_INTERVAL * time.Second)) {
 		peer.lastConnectTime = time.Now()
 
@@ -552,7 +613,10 @@ func (this *PeerList) refreshPeer(peer *Peer) {
 
 			go this.handleConnection(nConn, peer, "")
 		}()
-	} else if peer.conn != nil && time.Now().After(peer.lastAnnounceTime.Add(ANNOUNCE_INTERVAL * time.Second)) {
+	}
+
+	// announce locally cached blocks every ANNOUNCE_INTERVAL seconds
+	if peer.conn != nil && time.Now().After(peer.lastAnnounceTime.Add(ANNOUNCE_INTERVAL * time.Second)) {
 		peer.lastAnnounceTime = time.Now()
 
 		// we can't call cache while we have the lock, so we do with an asynchronous callback
