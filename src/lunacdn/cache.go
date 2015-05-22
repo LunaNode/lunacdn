@@ -339,3 +339,63 @@ func (this *Cache) Load() {
 
 	Log.Info.Printf("Loaded %d files and %d blocks", len(this.files), countBlocks)
 }
+
+func (this *Cache) RegisterFile(filePath string, path string) bool {
+	fin, err := os.Open(filePath)
+	if err != nil {
+		Log.Error.Printf("Error encountered while reading from file [%s]: %s", filePath, err.Error())
+		return false
+	}
+	defer fin.Close()
+
+	buf := make([]byte, BLOCK_SIZE)
+	pathHash := pathToHash(path)
+	length := 0
+	index := 0
+
+	for {
+		readCount, err := fin.Read(buf)
+		if err != nil {
+			Log.Error.Printf("Error encountered while reading from file [%s]: %s", filePath, err.Error())
+			return false
+		}
+
+		// commit bytes to next object file
+		objPath := fmt.Sprintf("%s/%s_%d.obj", this.cacheLocation, pathHash, index)
+		fout, err := os.Create(objPath)
+		if err != nil {
+			Log.Error.Printf("Error encountered while writing to [%s] for file registration: %s", objPath, err.Error())
+			return false
+		}
+
+		_, err = fout.Write(buf[:readCount])
+		if err != nil {
+			Log.Error.Printf("Error encountered while writing to [%s] for file registration: %s", objPath, err.Error())
+			return false
+		}
+
+		length += readCount
+		index++
+		if readCount < BLOCK_SIZE {
+			break
+		}
+	}
+
+	// create .meta file
+	metaString := fmt.Sprintf("%s:%d", pathHash, length)
+	metaFile := fmt.Sprintf("%s/%s.meta", this.cacheLocation, pathHash)
+	err = ioutil.WriteFile(metaFile, []byte(metaString), 0644)
+	if err != nil {
+		Log.Error.Printf("Failed to write file metadata to [%s]: %s", metaFile, err.Error())
+		return false
+	}
+
+	this.mu.Lock()
+	cacheFile := this.appendFile(pathHash, int64(length))
+	for _, block := range cacheFile.Blocks {
+		// no need to lock on block -- we still have this.mu locked, so no one could have pointer to the file yet
+		block.OnDisk = true
+	}
+	this.mu.Unlock()
+	return true
+}
