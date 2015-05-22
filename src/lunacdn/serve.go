@@ -37,23 +37,25 @@ func (this *Serve) Handler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	Log.Debug.Printf("Request for [%s]: in progress", shortPath)
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", pathParts[len(pathParts) - 1]))
-	w.Header().Set("Content-Type", "application/octet-stream")
-
 	blockIndex := 0
+
 	for {
 		block := this.cache.DownloadRead(file, blockIndex, true)
-		w.Write(block)
 
+		// if this is the first empty block, we should 404, otherwise just quit
+		// if we see first non-empty block then set headers
 		if block == nil {
+			if blockIndex == 0 {
+				this.NotFound(w)
+			}
 			break
+		} else if blockIndex == 0 {
+			w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", pathParts[len(pathParts) - 1]))
+			w.Header().Set("Content-Type", "application/octet-stream")
 		}
 
+		w.Write(block)
 		blockIndex++
-	}
-
-	if blockIndex == 0 {
-		this.NotFound(w)
 	}
 }
 

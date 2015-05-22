@@ -13,6 +13,13 @@ const PROTO_DOWNLOAD_CANCEL = 3
 const PROTO_ANNOUNCE_CONTINUE = 4
 const PROTO_UPLOAD = 5
 const PROTO_UPLOAD_PART = 6
+const PROTO_HELLO = 7
+
+// how frequently to attempt to connect to disconnected peers
+const CONNECT_INTERVAL = 10
+
+// how frequently to announce blocks
+const ANNOUNCE_INTERVAL = 10
 
 // default speed to assume from untested peer
 const DEFAULT_PEER_SPEED = 10 * 1000

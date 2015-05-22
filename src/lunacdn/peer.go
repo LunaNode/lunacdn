@@ -8,6 +8,12 @@ import "encoding/binary"
 import "math/rand"
 import "bytes"
 
+/*
+Synchronization strategy
+- Lock this.mu before peer.mu
+- Never call cache when we have the lock
+*/
+
 type PeerDownload struct {
 	Id int64
 	NotifyChannel chan bool
@@ -22,15 +28,18 @@ type PeerBlock struct {
 }
 
 type Peer struct {
+	addr string
 	mu sync.Mutex // used for updating fields and sending data; receiving data is done outside the lock
 	conn *net.TCPConn
-	nextConnectTime time.Time
+	lastConnectTime time.Time
+	lastAnnounceTime time.Time
 	cache *Cache
+	peerId int64
 
 	// set of blocks this peer advertises
 	availableBlocks map[PeerBlock]bool
 
-	// indicator for how quickly we download a block from this peer
+	// indicator for how quickly we download a block from this peer (milliseconds)
 	// recomputed as rollingSpeed = 0.3 * speed + 0.7 * rollingSpeed
 	rollingSpeed int64
 
@@ -38,29 +47,55 @@ type Peer struct {
 	pendingDownloads map[int64]*PeerDownload
 }
 
-type PeerList struct {
-	mu sync.Mutex
-	peers map[string]*Peer
-	listener *net.TCPListener
-	cache *Cache
+func MakePeer(addr string, peerId int64) *Peer {
+	this := new(Peer)
+	this.addr = addr
+	this.peerId = peerId
+	this.availableBlocks = make(map[PeerBlock]bool)
+	this.pendingDownloads = make(map[int64]*PeerDownload)
+
+	this.lastConnectTime = time.Now()
+	this.rollingSpeed = DEFAULT_PEER_SPEED
+	return this
 }
 
-func MakePeerList(cfg *Config) *PeerList {
+type PeerList struct {
+	mu sync.Mutex
+	peers map[int64]*Peer
+	authorizedIPs map[string]bool
+	discoverable map[string]time.Time
+	listener *net.TCPListener
+	cache *Cache
+
+	// temporary random identifier for this peer
+	peerId int64
+}
+
+func MakePeerList(cfg *Config, exitChannel chan bool) *PeerList {
 	this := new(PeerList)
+	this.peerId = rand.Int63()
 
 	// construct map of peers from config
-	this.peers = make(map[string]*Peer)
+	this.peers = make(map[int64]*Peer)
+	this.authorizedIPs = make(map[string]bool)
+	this.discoverable = make(map[string]time.Time)
+	defaultPortStr := strings.Split(cfg.BackendBind, ":")[1]
+
 	for _, peerAddr := range strings.Split(cfg.BackendList, ",") {
 		peerAddr = strings.TrimSpace(peerAddr)
 		if len(peerAddr) > 0 {
-			this.peers[peerAddr] = &Peer{
-				availableBlocks: make(map[PeerBlock]bool),
-				rollingSpeed: -1,
+			peerAddrParts := strings.Split(peerAddr, ":")
+			this.authorizedIPs[peerAddrParts[0]] = true
+
+			// add port if missing
+			if len(peerAddrParts) == 1 {
+				peerAddr += ":" + defaultPortStr
 			}
+			this.discoverable[peerAddr] = time.Now().Add(-1 * CONNECT_INTERVAL * time.Second)
 		}
 	}
 
-	Log.Info.Printf("Loaded %d peers", len(this.peers))
+	Log.Info.Printf("Loaded %d authorized IPs", len(this.authorizedIPs))
 
 	// initialize server socket
 	Log.Info.Printf("Listening for backend connections on [%s]", cfg.BackendBind)
@@ -83,8 +118,17 @@ func MakePeerList(cfg *Config) *PeerList {
 				continue
 			}
 			Log.Info.Printf("New connection from %s", conn.RemoteAddr().String())
-			this.handleConnection(conn)
+			this.handleConnection(conn, nil, "")
+		}
 
+		exitChannel <- true
+	}()
+
+	// connect to peers
+	go func() {
+		for {
+			time.Sleep(time.Second)
+			this.refreshPeers()
 		}
 	}()
 
@@ -95,21 +139,101 @@ func (this *PeerList) SetCache(cache *Cache) {
 	this.cache = cache
 }
 
-func (this *PeerList) handleConnection(conn *net.TCPConn) {
+/*
+ * Connection handler.
+ * conn: the connected connection, either received or finished connecting to remote end
+ * peer: set if we are connecting since we disconnected from an existing peer
+ * discoveredVia: set if we are connecting to a new discoverable
+ */
+func (this *PeerList) handleConnection(conn *net.TCPConn, peer *Peer, discoveredVia string) {
 	defer conn.Close()
-	peer := this.authorizeConnection(conn)
-	if peer == nil {
+	addr := strings.Split(conn.RemoteAddr().String(), ":")[0] // get IP only for whitelisting
+	_, ok := this.authorizedIPs[addr] // no synchronization issue since read-only table
+	if !ok {
+		Log.Warn.Printf("Rejecting unauthorized connection from %s", addr)
 		return
 	}
 
-	addr := conn.RemoteAddr().String()
+	conn.Write(protocolSendHello(this.peerId).Bytes())
+	helloSuccess, helloPeerId := protocolReadHello(conn)
+	if !helloSuccess {
+		return
+	}
+
+	// we have peer ID now, so we will either create peer or the peer will be someone we don't want to connect to
+	// this means we can remove from discoverable map
+	if discoveredVia != "" {
+		this.mu.Lock()
+		delete(this.discoverable, discoveredVia)
+		this.mu.Unlock()
+	}
+
+	// if peer ID matches our own, we connected to ourself...
+	if helloPeerId == this.peerId {
+		Log.Warn.Printf("Detected connection with self (addr=%s)", conn.RemoteAddr().String())
+		return
+	}
+
+	// set up the peer struct
+	if peer != nil {
+		// this is successful outgoing connection to a peer that we already have entry for
+		// this is easy if the peerId is same, but there is possibility peerId changed
+		//  in that case we create a new peer entry
+		if helloPeerId != peer.peerId {
+			oldPeer := peer
+			this.mu.Lock()
+			delete(this.peers, oldPeer.peerId)
+
+			// verify that new peer ID is not in the table (another connection might have already registered it)
+			_, already := this.peers[helloPeerId]
+
+			if !already {
+				this.peers[helloPeerId] = MakePeer(oldPeer.addr, helloPeerId)
+				peer = this.peers[helloPeerId]
+			} else {
+				this.mu.Unlock()
+				return
+			}
+			this.mu.Unlock()
+		}
+	} else {
+		// this is either incoming connection, or outgoing connection to new discovery
+		// we can handle this UNLESS this is an incoming connection from a new peer
+		//  (in which case we wouldn't have the peer address, so need to do hello exchange with outgoing connection first)
+		this.mu.Lock()
+		peer, ok = this.peers[helloPeerId]
+		if !ok {
+			if discoveredVia != "" {
+				this.peers[helloPeerId] = MakePeer(discoveredVia, helloPeerId)
+				peer = this.peers[helloPeerId]
+			} else {
+				Log.Warn.Printf("Connection with %s delayed to obtain full addr/port information", addr)
+				this.mu.Unlock()
+				return
+			}
+		}
+		this.mu.Unlock()
+	}
+
+	peer.mu.Lock()
+	if peer.conn != nil {
+		Log.Info.Printf("Rejecting duplicate connection with %s", peer.addr)
+		peer.mu.Unlock()
+		return
+	}
+	peer.conn = conn
+	peer.mu.Unlock()
+	Log.Info.Printf("Successful connection with %s", peer.addr)
+
 	buf := make([]byte, 65536)
 	bufPos := 0
 
 	for {
+		// TODO: consider reading header first, then reading correct amount of bytes synchronously..
+		conn.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
 		count, err := conn.Read(buf[bufPos:])
-		if err != nil {
-			Log.Info.Printf("Disconnected from %s: %s", addr, err.Error())
+		if err != nil && !strings.Contains(err.Error(), "timeout") {
+			Log.Info.Printf("Disconnected from %s: %s", peer.addr, err.Error())
 			break
 		}
 
@@ -121,7 +245,7 @@ func (this *PeerList) handleConnection(conn *net.TCPConn) {
 		}
 
 		if buf[0] != HEADER_CONSTANT {
-			Log.Warn.Printf("Invalid header constant from %s, terminating connection", addr)
+			Log.Warn.Printf("Invalid header constant from %s, terminating connection", peer.addr)
 			break
 		}
 
@@ -132,7 +256,7 @@ func (this *PeerList) handleConnection(conn *net.TCPConn) {
 		}
 		packet := bytes.NewBuffer(buf[4:packetLen])
 
-		// TODO: we can push processing to another thread probably?
+		// TODO: we can push processing to another thread probably? need to copy bytes though?
 		if header == PROTO_ANNOUNCE {
 			this.handleAnnounce(peer, protocolReadAnnounce(packet), true)
 		} else if header == PROTO_ANNOUNCE_CONTINUE {
@@ -147,7 +271,17 @@ func (this *PeerList) handleConnection(conn *net.TCPConn) {
 			downloadId, fileHash, blockIndex := protocolReadDownload(packet)
 			this.handleDownload(peer, downloadId, fileHash, blockIndex)
 		}
+
+		newPos := bufPos - int(packetLen)
+		copy(buf[0:newPos], buf[packetLen:bufPos])
+		bufPos = newPos
 	}
+
+	peer.mu.Lock()
+	if peer.conn == conn {
+		peer.conn = nil
+	}
+	peer.mu.Unlock()
 }
 
 func (this *PeerList) handleAnnounce(peer *Peer, files []AnnounceFile, restart bool) {
@@ -155,8 +289,10 @@ func (this *PeerList) handleAnnounce(peer *Peer, files []AnnounceFile, restart b
 	defer peer.mu.Unlock()
 
 	if restart {
+		Log.Debug.Printf("[%s] Restarting peer's available blocks", peer.addr)
 		peer.availableBlocks = make(map[PeerBlock]bool)
 	}
+	Log.Debug.Printf("[%s] Receiving %d available files in announcement", peer.addr, len(files))
 
 	for _, file := range files {
 		go this.cache.NotifyFile(file.Hash, file.Length)
@@ -174,9 +310,11 @@ func (this *PeerList) handleUpload(peer *Peer, downloadId int64, downloadLen int
 	if peer.conn == nil {
 		return
 	}
+	Log.Debug.Printf("Begin upload from %s for %d (%d bytes)", peer.addr, downloadId, downloadLen)
 
 	download, ok := peer.pendingDownloads[downloadId]
 	if !ok {
+		Log.Debug.Printf("Upload from %s references unknown download %d, cancelling", peer.addr, downloadId)
 		peer.conn.Write(protocolSendDownloadCancel(downloadId).Bytes())
 		return
 	}
@@ -196,6 +334,7 @@ func (this *PeerList) handleUploadPart(peer *Peer, downloadId int64, part []byte
 
 	download, ok := peer.pendingDownloads[downloadId]
 	if !ok {
+		Log.Debug.Printf("Upload part from %s references unknown download %d, cancelling", peer.addr, downloadId)
 		peer.conn.Write(protocolSendDownloadCancel(downloadId).Bytes())
 		return
 	}
@@ -207,19 +346,27 @@ func (this *PeerList) handleUploadPart(peer *Peer, downloadId int64, part []byte
 		download.Bytes = download.Bytes[:download.Length]
 		download.NotifyChannel <- true
 		delete(peer.pendingDownloads, downloadId)
+
+		// updating rolling speed
+		downloadTime := time.Now().Sub(download.StartTime).Nanoseconds() / 1000 / 1000 // convert to ms
+		peer.rollingSpeed = int64(float64(peer.rollingSpeed) * 0.7 + float64(downloadTime) * 0.3)
 	}
 }
 
 func (this *PeerList) handleDownload(peer *Peer, downloadId int64, fileHash string, blockIndex int) {
-	cacheFile := this.cache.DownloadInit(fileHash)
+	cacheFile := this.cache.DownloadInitHash(fileHash)
 	if cacheFile == nil {
+		Log.Warn.Printf("Failed to handle download from %s: cache doesn't contain file %s", peer.addr, fileHash)
 		return
 	}
 
 	bytes := this.cache.DownloadRead(cacheFile, blockIndex, false)
 	if bytes == nil {
+		Log.Warn.Printf("Failed to handle download from %s: cache did not provide block %s/%d", peer.addr, fileHash, blockIndex)
 		return
 	}
+
+	Log.Debug.Printf("Handling download from %s, providing block %s/%d", peer.addr, fileHash, blockIndex)
 
 	go func() {
 		peer.mu.Lock()
@@ -228,7 +375,13 @@ func (this *PeerList) handleDownload(peer *Peer, downloadId int64, fileHash stri
 
 		for i := 0; i < len(bytes); i += TRANSFER_PACKET_SIZE {
 			peer.mu.Lock()
-			peer.conn.Write(protocolSendUploadPart(downloadId, bytes[i:i+4096]).Bytes())
+			// write next TRANSFER_PACKET_SIZE bytes, or up to the block length
+			limit := i + TRANSFER_PACKET_SIZE
+			if limit > len(bytes) {
+				limit = len(bytes)
+			}
+
+			peer.conn.Write(protocolSendUploadPart(downloadId, bytes[i:limit]).Bytes())
 			peer.mu.Unlock()
 		}
 	}()
@@ -237,12 +390,14 @@ func (this *PeerList) handleDownload(peer *Peer, downloadId int64, fileHash stri
 func (this *PeerList) startDownload(peer *Peer, peerBlock PeerBlock) *PeerDownload {
 	peer.mu.Lock()
 	defer peer.mu.Unlock()
+
 	if peer.conn != nil {
 		downloadId := rand.Int63()
 
 		// send download packet
 		_, err := peer.conn.Write(protocolSendDownload(downloadId, peerBlock.FileHash, peerBlock.Index).Bytes())
 		if err != nil {
+			Log.Debug.Printf("Failed to initialize download from %s: error during download packet: %s", peer.addr, err.Error())
 			peer.rollingSpeed *= 2
 			return nil
 		}
@@ -256,8 +411,10 @@ func (this *PeerList) startDownload(peer *Peer, peerBlock PeerBlock) *PeerDownlo
 			StartTime: time.Now(),
 		}
 		peer.pendingDownloads[download.Id] = download
+		Log.Debug.Printf("Initialized download from %s (id=%d)", peer.addr, download.Id)
 		return download
 	} else {
+		Log.Debug.Printf("Failed to initialize download from %s: peer is disconnected", peer.addr)
 		peer.rollingSpeed *= 2
 		return nil
 	}
@@ -276,6 +433,11 @@ func (this *PeerList) DownloadBlock(fileHash string, blockIndex int, timeout tim
 
 	for time.Now().Before(startTime.Add(timeout)) {
 		peer := this.findPeerWithBlock(peerBlock)
+		if peer == nil {
+			Log.Warn.Printf("Failed to find peer with block %s/%d", peerBlock.FileHash, peerBlock.Index)
+			return nil
+		}
+
 		download := this.startDownload(peer, peerBlock)
 		if download == nil {
 			continue
@@ -285,6 +447,7 @@ func (this *PeerList) DownloadBlock(fileHash string, blockIndex int, timeout tim
 			case <- download.NotifyChannel:
 				return download.Bytes
 			case <- time.After(timeout - time.Now().Sub(startTime)):
+				Log.Warn.Printf("Download from peer %s has timed out, failed request", peer.addr)
 				this.cancelDownload(peer, download.Id)
 				return nil
 		}
@@ -333,25 +496,74 @@ func (this *PeerList) findPeerWithBlock(peerBlock PeerBlock) *Peer {
 	return nil
 }
 
-func (this *PeerList) authorizeConnection(conn *net.TCPConn) *Peer {
+func (this *PeerList) refreshPeers() {
 	this.mu.Lock()
 	defer this.mu.Unlock()
 
-	addr := conn.RemoteAddr().String()
-	peer, ok := this.peers[addr]
-	if !ok {
-		Log.Info.Printf("Rejecting connection from unauthorized peer (%s)", addr)
-		return nil
+	// try connecting to existing disconnected peers
+	for _, peer := range this.peers {
+		this.refreshPeer(peer)
 	}
 
+	// also try the initial connect map
+	for addr, lastTime := range this.discoverable {
+		if time.Now().After(lastTime.Add(CONNECT_INTERVAL * time.Second)) {
+			this.discoverable[addr] = time.Now()
+			go func(addr string) {
+				Log.Info.Printf("Attempting to connect to %s", addr)
+				tcpAddr, err := net.ResolveTCPAddr("tcp", addr)
+				if err != nil {
+					Log.Info.Printf("Failed to connect to %s: %s", addr, err.Error())
+					return
+				}
+
+				nConn, err := net.DialTCP("tcp", nil, tcpAddr)
+				if err != nil {
+					Log.Info.Printf("Failed to connect to %s: %s", addr, err.Error())
+					return
+				}
+
+				go this.handleConnection(nConn, nil, addr)
+			}(addr)
+		}
+	}
+}
+
+func (this *PeerList) refreshPeer(peer *Peer) {
 	peer.mu.Lock()
 	defer peer.mu.Unlock()
 
-	if peer.conn != nil {
-		Log.Info.Printf("Rejecting duplicate connection with %s", addr)
-		return nil
-	}
+	if peer.conn == nil && time.Now().After(peer.lastConnectTime.Add(CONNECT_INTERVAL * time.Second)) {
+		peer.lastConnectTime = time.Now()
 
-	peer.conn = conn
-	return peer
+		go func() {
+			Log.Info.Printf("Attempting to connect to %s", peer.addr)
+			tcpAddr, err := net.ResolveTCPAddr("tcp", peer.addr)
+			if err != nil {
+				Log.Info.Printf("Failed to connect to %s: %s", peer.addr, err.Error())
+				return
+			}
+
+			nConn, err := net.DialTCP("tcp", nil, tcpAddr)
+			if err != nil {
+				Log.Info.Printf("Failed to connect to %s: %s", peer.addr, err.Error())
+				return
+			}
+
+			go this.handleConnection(nConn, peer, "")
+		}()
+	} else if peer.conn != nil && time.Now().After(peer.lastAnnounceTime.Add(ANNOUNCE_INTERVAL * time.Second)) {
+		peer.lastAnnounceTime = time.Now()
+
+		// we can't call cache while we have the lock, so we do with an asynchronous callback
+		callback := func(announceFiles []AnnounceFile) {
+				peer.mu.Lock()
+				defer peer.mu.Unlock()
+				if peer.conn != nil {
+					Log.Debug.Printf("Announcing %d blocks to %s", len(announceFiles), peer.addr)
+					peer.conn.Write(protocolSendAnnounce(announceFiles).Bytes())
+				}
+			}
+		go this.cache.PrepareAnnounce(callback)
+	}
 }

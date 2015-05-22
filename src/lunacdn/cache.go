@@ -116,11 +116,14 @@ func (this *Cache) appendFile(hash string, length int64) *CacheFile {
 }
 
 func (this *Cache) DownloadInit(path string) *CacheFile {
+	return this.DownloadInitHash(pathToHash(path))
+}
+
+func (this *Cache) DownloadInitHash(pathHash string) *CacheFile {
 	this.mu.Lock()
 	defer this.mu.Unlock()
 
 	// check if we have the file registered in cache
-	pathHash := pathToHash(path)
 	file := this.files[pathHash]
 	return file // may be nil if we don't have it
 }
@@ -232,6 +235,34 @@ func (this *Cache) accessedBlock(updateBlock *CacheBlock) {
 		}
 		lruBlock.mu.Unlock()
 	}
+}
+
+type prepareAnnounceCallback func([]AnnounceFile)
+func (this *Cache) PrepareAnnounce(callback prepareAnnounceCallback) {
+	this.mu.Lock()
+	defer this.mu.Unlock()
+
+	announceFiles := make([]AnnounceFile, 0)
+
+	for _, file := range this.files {
+		indexes := make([]int, 0)
+		for _, block := range file.Blocks {
+			if block.OnDisk {
+				indexes = append(indexes, block.Index)
+			}
+		}
+
+		if len(indexes) > 0 {
+			announceFile := AnnounceFile{
+				Hash: file.PathHash,
+				Length: file.Length,
+				Indexes: indexes,
+			}
+			announceFiles = append(announceFiles, announceFile)
+		}
+	}
+
+	callback(announceFiles)
 }
 
 func (this *Cache) Load() {

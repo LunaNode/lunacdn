@@ -18,9 +18,9 @@ type ConfigMeta struct {
 	Default Config
 }
 
-func LoadConfig() *Config {
+func LoadConfig(cfgPath string) *Config {
 	var cfg ConfigMeta
-	err := gcfg.ReadFileInto(&cfg, "lunacdn.cfg")
+	err := gcfg.ReadFileInto(&cfg, cfgPath)
 	if err != nil {
 		Log.Error.Printf("Error while reading configuration: %s", err.Error())
 		panic(err)
