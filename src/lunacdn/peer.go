@@ -556,14 +556,13 @@ func (this *PeerList) refreshPeer(peer *Peer) {
 		peer.lastAnnounceTime = time.Now()
 
 		// we can't call cache while we have the lock, so we do with an asynchronous callback
-		callback := func(announceFiles []AnnounceFile) {
-				peer.mu.Lock()
-				defer peer.mu.Unlock()
-				if peer.conn != nil {
-					Log.Debug.Printf("Announcing %d blocks to %s", len(announceFiles), peer.addr)
-					peer.conn.Write(protocolSendAnnounce(announceFiles).Bytes())
-				}
+		go this.cache.PrepareAnnounce(func(announceFiles []AnnounceFile) {
+			peer.mu.Lock()
+			defer peer.mu.Unlock()
+			if peer.conn != nil {
+				Log.Debug.Printf("Announcing %d blocks to %s", len(announceFiles), peer.addr)
+				peer.conn.Write(protocolSendAnnounce(announceFiles).Bytes())
 			}
-		go this.cache.PrepareAnnounce(callback)
+		})
 	}
 }
