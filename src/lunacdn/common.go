@@ -21,6 +21,9 @@ const CONNECT_INTERVAL = 10
 // how frequently to announce blocks
 const ANNOUNCE_INTERVAL = 10
 
+// how frequently to print peer stats
+const PEER_STATS_INTERVAL = 60
+
 // default speed to assume from untested peer
 const DEFAULT_PEER_SPEED = 10 * 1000
 

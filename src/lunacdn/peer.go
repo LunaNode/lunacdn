@@ -178,6 +178,20 @@ func MakePeerList(cfg *Config, exitChannel chan bool) *PeerList {
 		}
 	}()
 
+	// print out peer speed statistics
+	go func() {
+		for {
+			time.Sleep(PEER_STATS_INTERVAL * time.Second)
+			this.mu.Lock()
+			for _, peer := range this.peers {
+				peer.mu.Lock()
+				Log.Info.Printf("Stats with %s: rollingSpeed=%.2f sec", peer.addr, float32(peer.rollingSpeed) / 1000)
+				peer.mu.Unlock()
+			}
+			this.mu.Unlock()
+		}
+	}()
+
 	return this
 }
 
@@ -393,9 +407,12 @@ func (this *PeerList) handleUploadPart(peer *Peer, downloadId int64, part []byte
 		download.NotifyChannel <- true
 		delete(peer.pendingDownloads, downloadId)
 
-		// updating rolling speed
-		downloadTime := time.Now().Sub(download.StartTime).Nanoseconds() / 1000 / 1000 // convert to ms
-		peer.rollingSpeed = int64(float64(peer.rollingSpeed) * 0.7 + float64(downloadTime) * 0.3)
+		// updating rolling speed, but only if this was a large enough block
+		if download.Length >= BLOCK_SIZE / 4 {
+			downloadTime := time.Now().Sub(download.StartTime).Nanoseconds() / 1000 / 1000 // convert to ms
+			timePerBlock := float64(downloadTime) * BLOCK_SIZE / float64(download.Length)
+			peer.rollingSpeed = int64(float64(peer.rollingSpeed) * 0.7 + timePerBlock * 0.3)
+		}
 	}
 }
 
