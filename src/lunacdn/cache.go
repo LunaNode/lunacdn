@@ -371,13 +371,7 @@ func (this *Cache) RegisterFile(filePath string, path string) bool {
 
 		// commit bytes to next object file
 		objPath := fmt.Sprintf("%s/%s_%d.obj", this.cacheLocation, pathHash, index)
-		fout, err := os.Create(objPath)
-		if err != nil {
-			Log.Error.Printf("Error encountered while writing to [%s] for file registration: %s", objPath, err.Error())
-			return false
-		}
-
-		_, err = fout.Write(buf[:readCount])
+		err = ioutil.WriteFile(objPath, buf[:readCount], 0644)
 		if err != nil {
 			Log.Error.Printf("Error encountered while writing to [%s] for file registration: %s", objPath, err.Error())
 			return false
