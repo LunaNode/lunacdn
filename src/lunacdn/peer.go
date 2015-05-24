@@ -285,56 +285,55 @@ func (this *PeerList) handleConnection(conn *net.TCPConn, peer *Peer, discovered
 	peer.mu.Unlock()
 	Log.Info.Printf("Successful connection with %s", peer.addr)
 
+	header := make([]byte, 4)
 	buf := make([]byte, 65536)
-	bufPos := 0
 
 	for {
-		// TODO: consider reading header first, then reading correct amount of bytes synchronously..
-		conn.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
-		count, err := conn.Read(buf[bufPos:])
-		if err != nil && !strings.Contains(err.Error(), "timeout") {
+		count, err := conn.Read(header)
+		if err != nil {
 			Log.Info.Printf("Disconnected from %s: %s", peer.addr, err.Error())
+			break
+		} else if count != len(header) {
+			Log.Info.Printf("Disconnected from %s: failed to read full packet header", peer.addr)
 			break
 		}
 
-		bufPos += count
-
-		// try to process a packet
-		if bufPos < 4 {
-			continue
-		}
-
-		if buf[0] != HEADER_CONSTANT {
+		if header[0] != HEADER_CONSTANT {
 			Log.Warn.Printf("Invalid header constant from %s, terminating connection", peer.addr)
 			break
 		}
 
-		header := buf[1]
-		packetLen := binary.BigEndian.Uint16(buf[2:4])
-		if bufPos < int(packetLen) {
-			continue
+		packetType := header[1]
+		packetLen := binary.BigEndian.Uint16(header[2:4])
+		count, err = conn.Read(buf[:packetLen-4])
+		if err != nil {
+			Log.Info.Printf("Disconnected from %s: %s", peer.addr, err.Error())
+			break
+		} else if uint16(count) != packetLen - 4 {
+			Log.Info.Printf("Disconnected from %s: failed to read full packet body", peer.addr)
+			break
 		}
-		packet := bytes.NewBuffer(buf[4:packetLen])
+
+		packet := bytes.NewBuffer(buf[:packetLen-4])
 
 		// TODO: we can push processing to another thread probably? need to copy bytes though?
-		if header == PROTO_ANNOUNCE {
+		if packetType == PROTO_ANNOUNCE {
 			this.handleAnnounce(peer, protocolReadAnnounce(packet), true)
-		} else if header == PROTO_ANNOUNCE_CONTINUE {
+		} else if packetType == PROTO_ANNOUNCE_CONTINUE {
 			this.handleAnnounce(peer, protocolReadAnnounce(packet), false)
-		} else if header == PROTO_UPLOAD {
+		} else if packetType == PROTO_UPLOAD {
 			downloadId, downloadLen := protocolReadUpload(packet)
 			this.handleUpload(peer, downloadId, downloadLen)
-		} else if header == PROTO_UPLOAD_PART {
+		} else if packetType == PROTO_UPLOAD_PART {
 			downloadId, part := protocolReadUploadPart(packet)
 			this.handleUploadPart(peer, downloadId, part)
-		} else if header == PROTO_DOWNLOAD {
+		} else if packetType == PROTO_DOWNLOAD {
 			downloadId, fileHash, blockIndex := protocolReadDownload(packet)
 			this.handleDownload(peer, downloadId, fileHash, blockIndex)
+		} else {
+			Log.Info.Printf("Disconnected from %s: unknown packet type %d", peer.addr, packetType)
+			break
 		}
-
-		newPos := bufPos - int(packetLen)
-		copy(buf[0:newPos], buf[packetLen:bufPos])
-		bufPos = newPos
 	}
 
 	peer.mu.Lock()
