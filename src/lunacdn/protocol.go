@@ -69,7 +69,7 @@ func protocolReadAnnounce(buf *bytes.Buffer) []AnnounceFile {
 		binary.Read(buf, binary.BigEndian, &file.Length)
 
 		// find out what blocks the peer has
-		// block indexes are range-encoded, we call each range a section
+		// block indexes are length-encoded, we call each index-length pair a section
 		var sectionStart uint32
 		var numSections, sectionLength uint16
 		binary.Read(buf, binary.BigEndian, &numSections)
