@@ -93,6 +93,7 @@ func (this *Serve) Handler(w http.ResponseWriter, r *http.Request) {
 		} else if firstBlock {
 			w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", pathParts[len(pathParts) - 1]))
 			w.Header().Set("Content-Type", "application/octet-stream")
+			w.Header().Set("Content-Length", fmt.Sprintf("%d", file.Length))
 			firstBlock = false
 		}
 
