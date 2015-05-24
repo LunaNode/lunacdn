@@ -183,6 +183,7 @@ func (this *Cache) DownloadRead(file *CacheFile, index int, tryPeers bool) []byt
 			} else {
 				block.OnDisk = true
 			}
+			go this.accessedBlock(block) // update access time, clean cache
 			return bytes
 		}
 	}
