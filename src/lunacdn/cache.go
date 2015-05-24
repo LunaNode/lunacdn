@@ -13,6 +13,7 @@ import "fmt"
 import "io/ioutil"
 import "os"
 import "strconv"
+import "runtime"
 import "strings"
 
 /*
@@ -59,6 +60,9 @@ type Cache struct {
 	// blocks currently stored in-memory or on-disk
 	cachedInMemory map[*CacheBlock]time.Time
 	cachedOnDisk map[*CacheBlock]time.Time
+
+	// how many uncached from cachedInMemory before last runtime.GC() call
+	uncachesSinceFree int
 
 	memoryLimit int
 	diskLimit int
@@ -214,7 +218,13 @@ func (this *Cache) accessedBlock(updateBlock *CacheBlock) {
 		lruBlock.mu.Lock()
 		lruBlock.Data = nil
 		delete(this.cachedInMemory, lruBlock)
+		this.uncachesSinceFree++
 		lruBlock.mu.Unlock()
+	}
+
+	if this.uncachesSinceFree >= this.memoryLimit / 2 {
+		runtime.GC()
+		this.uncachesSinceFree = 0
 	}
 
 	for this.diskLimit != -1 && len(this.cachedOnDisk) > this.diskLimit {
