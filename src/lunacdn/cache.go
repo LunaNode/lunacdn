@@ -202,7 +202,7 @@ func (this *Cache) accessedBlock(updateBlock *CacheBlock) {
 	}
 	updateBlock.mu.Unlock()
 
-	for len(this.cachedOnDisk) > this.memoryLimit {
+	for len(this.cachedInMemory) > this.memoryLimit {
 		var lruBlock *CacheBlock
 
 		for block, time := range this.cachedInMemory {
