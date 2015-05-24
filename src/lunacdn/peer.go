@@ -355,7 +355,7 @@ func (this *PeerList) handleAnnounce(peer *Peer, files []AnnounceFile, restart b
 	Log.Debug.Printf("[%s] Receiving %d available files in announcement", peer.addr, len(files))
 
 	for _, file := range files {
-		go this.cache.NotifyFile(file.Hash, file.Length)
+		go this.cache.NotifyFile(file.Hash, file.Length, file.NumBlocks)
 
 		for _, idx := range file.Indexes {
 			peerBlock := PeerBlock{FileHash: file.Hash, Index: idx}
