@@ -85,7 +85,7 @@ type Peer struct {
 	// set of blocks this peer advertises
 	availableBlocks map[PeerBlock]bool
 
-	// indicator for how quickly we download a block from this peer (milliseconds)
+	// indicator for how quickly we download a block from this peer (microseconds)
 	// recomputed as rollingSpeed = 0.3 * speed + 0.7 * rollingSpeed
 	rollingSpeed int64
 
@@ -185,7 +185,7 @@ func MakePeerList(cfg *Config, exitChannel chan bool) *PeerList {
 			this.mu.Lock()
 			for _, peer := range this.peers {
 				peer.mu.Lock()
-				Log.Info.Printf("Stats with %s: rollingSpeed=%.2f sec", peer.addr, float32(peer.rollingSpeed) / 1000)
+				Log.Info.Printf("Stats with %s: rollingSpeed=%.2f ms", peer.addr, float32(peer.rollingSpeed) / 1000)
 				peer.mu.Unlock()
 			}
 			this.mu.Unlock()
@@ -409,9 +409,13 @@ func (this *PeerList) handleUploadPart(peer *Peer, downloadId int64, part []byte
 
 		// updating rolling speed, but only if this was a large enough block
 		if download.Length >= BLOCK_SIZE / 4 {
-			downloadTime := time.Now().Sub(download.StartTime).Nanoseconds() / 1000 / 1000 // convert to ms
+			downloadTime := time.Now().Sub(download.StartTime).Nanoseconds() / 1000 // convert to microseconds
 			timePerBlock := float64(downloadTime) * BLOCK_SIZE / float64(download.Length)
 			peer.rollingSpeed = int64(float64(peer.rollingSpeed) * 0.7 + timePerBlock * 0.3)
+
+			if peer.rollingSpeed <= 0 {
+				peer.rollingSpeed = 1
+			}
 		}
 	}
 }
