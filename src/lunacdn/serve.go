@@ -3,6 +3,8 @@ package lunacdn
 import "net/http"
 import "fmt"
 import "strings"
+import "sync/atomic"
+import "time"
 
 type Serve struct {
 	cache *Cache
@@ -39,27 +41,68 @@ func (this *Serve) Handler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// the file seems to exist, so let's try to read it block by block
-	// we write each block to the HTTP connection as we retrieve it
+	// we read the blocks from our cache in a separate goroutine from where we write to the client
+	//  this is necessary since we don't want cache misses to stall client-server communication
+	// to synchronize, we:
+	//  a) use a buffered channel to send blocks from reader to writer
+	//      the size of the buffer is the maximum number of blocks to keep temporarily
+	//  b) the writer may terminate if there's an error; reader sees this by timing out
+	//      on reads and checking atomic boolean
 	Log.Debug.Printf("Request for [%s]: in progress", shortPath)
-	blockIndex := 0
+	blockChannel := make(chan []byte, SERVE_BUFFER_BLOCKS)
+	terminated := new(int32)
+	*terminated = 0
 
+	go func() {
+		blockIndex := 0
+		quit := false
+
+		for !quit {
+			block := this.cache.DownloadRead(file, blockIndex, true)
+			blockIndex++
+			written := false
+
+			for !written && !quit {
+				select {
+				case blockChannel <- block:
+					written = true
+				case <- time.After(time.Second):
+					if atomic.LoadInt32(terminated) != 0 {
+						quit = true
+					}
+				}
+			}
+
+			if block == nil {
+				break
+			}
+		}
+	}()
+
+	firstBlock := true
 	for {
-		block := this.cache.DownloadRead(file, blockIndex, true)
+		block := <- blockChannel
 
-		// if this is the first empty block, we should 404, otherwise just quit
+		// if this is the first empty block, we should 404, otherwise it probably means we're done so just quit
 		// if we see first non-empty block then set headers
 		if block == nil {
-			if blockIndex == 0 {
+			if firstBlock {
 				this.NotFound(w)
 			}
 			break
-		} else if blockIndex == 0 {
+		} else if firstBlock {
 			w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", pathParts[len(pathParts) - 1]))
 			w.Header().Set("Content-Type", "application/octet-stream")
+			firstBlock = false
 		}
 
-		w.Write(block)
-		blockIndex++
+		_, err := w.Write(block)
+
+		if err != nil {
+			Log.Debug.Printf("Failed to write block to HTTP: %s", err.Error())
+			atomic.StoreInt32(terminated, 1)
+			break
+		}
 	}
 }
 

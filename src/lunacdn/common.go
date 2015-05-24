@@ -28,10 +28,13 @@ const PEER_STATS_INTERVAL = 60
 const DEFAULT_PEER_SPEED = 10 * 1000
 
 // length of a block
-const BLOCK_SIZE = 1024 * 1024
+const BLOCK_SIZE = 128 * 1024
 
 // file transfer constants
-const TRANSFER_PACKET_SIZE = 4 * 1024
+const TRANSFER_PACKET_SIZE = 32 * 1024
+
+// how many blocks to buffer for clients
+const SERVE_BUFFER_BLOCKS = 5
 
 func randSeq(n int) string {
 	var letters = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
