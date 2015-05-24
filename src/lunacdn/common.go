@@ -36,6 +36,9 @@ const TRANSFER_PACKET_SIZE = 32 * 1024
 // how many blocks to buffer for clients
 const SERVE_BUFFER_BLOCKS = 5
 
+// number of bytes in file hashes
+const HASH_BYTES = 16
+
 func randSeq(n int) string {
 	var letters = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
     b := make([]rune, n)

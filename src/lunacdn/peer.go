@@ -642,7 +642,9 @@ func (this *PeerList) refreshPeer(peer *Peer) {
 			defer peer.mu.Unlock()
 			if peer.conn != nil {
 				Log.Debug.Printf("Announcing %d blocks to %s", len(announceFiles), peer.addr)
-				peer.conn.Write(protocolSendAnnounce(announceFiles).Bytes())
+				for _, buf := range protocolSendAnnounce(announceFiles) {
+					peer.conn.Write(buf.Bytes())
+				}
 			}
 		})
 	}
