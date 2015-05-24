@@ -370,7 +370,7 @@ func (this *PeerList) handleUpload(peer *Peer, downloadId int64, downloadLen int
 	if peer.conn == nil {
 		return
 	}
-	Log.Debug.Printf("Begin upload from %s for %d (%d bytes)", peer.addr, downloadId, downloadLen)
+	Log.Debug.Printf("Begin download from %s for %d (%d bytes)", peer.addr, downloadId, downloadLen)
 
 	download, ok := peer.pendingDownloads[downloadId]
 	if !ok {
