@@ -39,6 +39,9 @@ const SERVE_BUFFER_BLOCKS = 5
 // number of bytes in file hashes
 const HASH_BYTES = 16
 
+// how long to cache failed file downloads
+const DOWNLOAD_ERROR_CACHE_TIME = 30
+
 func randSeq(n int) string {
 	var letters = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
     b := make([]rune, n)

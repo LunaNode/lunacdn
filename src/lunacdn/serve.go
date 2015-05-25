@@ -3,17 +3,22 @@ package lunacdn
 import "net/http"
 import "fmt"
 import "strings"
+import "sync"
 import "sync/atomic"
 import "time"
 
 type Serve struct {
+	mu sync.Mutex
 	cache *Cache
 
+	// map from path to error time of recent files that failed to fully download
+	recentErrors map[string]time.Time
 }
 
 func MakeServe(cfg *Config, cache *Cache) *Serve {
 	this := new(Serve)
 	this.cache = cache
+	this.recentErrors = make(map[string]time.Time)
 
 	http.HandleFunc("/", this.Handler)
 	Log.Info.Printf("Starting HTTP server on [%s]", cfg.HttpBind)
@@ -31,6 +36,14 @@ func (this *Serve) Handler(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 	shortPath := path[1 : len(path)]
 	pathParts := strings.Split(shortPath, "/")
+
+	// check if we recently error'd on this file, in which case show 500
+	noError := this.CheckError(shortPath)
+	if !noError {
+		this.TemporarilyUnavailable(w)
+		Log.Debug.Printf("Request for [%s]: found in error cache", shortPath)
+		return
+	}
 
 	// grab the CacheFile object for reading
 	file := this.cache.DownloadInit(shortPath)
@@ -80,6 +93,7 @@ func (this *Serve) Handler(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	firstBlock := true
+	var writtenLength int64 = 0
 	for {
 		block := <- blockChannel
 
@@ -87,7 +101,15 @@ func (this *Serve) Handler(w http.ResponseWriter, r *http.Request) {
 		// if we see first non-empty block then set headers
 		if block == nil {
 			if firstBlock {
-				this.NotFound(w)
+				this.TemporarilyUnavailable(w)
+			}
+
+			// add to error cache if this download failed (didn't get all the bytes)
+			if writtenLength != file.Length {
+				Log.Warn.Printf("Failed to serve %s (len=%d but only wrote %d)", shortPath, file.Length, writtenLength)
+				this.mu.Lock()
+				this.recentErrors[shortPath] = time.Now()
+				this.mu.Unlock()
 			}
 			break
 		} else if firstBlock {
@@ -98,6 +120,7 @@ func (this *Serve) Handler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		_, err := w.Write(block)
+		writtenLength += int64(len(block))
 
 		if err != nil {
 			Log.Debug.Printf("Failed to write block to HTTP: %s", err.Error())
@@ -107,7 +130,29 @@ func (this *Serve) Handler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (this *Serve) CheckError(path string) bool {
+	this.mu.Lock()
+	defer this.mu.Unlock()
+
+	errorTime, ok := this.recentErrors[path]
+	if !ok {
+		return true
+	} else {
+		if time.Now().After(errorTime.Add(DOWNLOAD_ERROR_CACHE_TIME * time.Second)) {
+			delete(this.recentErrors, path)
+			return true
+		} else {
+			return false
+		}
+	}
+}
+
 func (this *Serve) NotFound(w http.ResponseWriter) {
 	w.WriteHeader(404)
 	fmt.Fprint(w, "404")
+}
+
+func (this *Serve) TemporarilyUnavailable(w http.ResponseWriter) {
+	w.WriteHeader(503)
+	fmt.Fprint(w, "503")
 }
