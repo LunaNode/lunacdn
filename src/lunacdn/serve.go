@@ -4,7 +4,6 @@ import "net/http"
 import "fmt"
 import "strings"
 import "sync"
-import "sync/atomic"
 import "time"
 
 type Serve struct {
@@ -63,8 +62,7 @@ func (this *Serve) Handler(w http.ResponseWriter, r *http.Request) {
 	//      on reads and checking atomic boolean
 	Log.Debug.Printf("Request for [%s]: in progress", shortPath)
 	blockChannel := make(chan []byte, SERVE_BUFFER_BLOCKS)
-	terminated := new(int32)
-	*terminated = 0
+	terminated := make(chan bool, 1)
 
 	go func() {
 		blockIndex := 0
@@ -79,10 +77,8 @@ func (this *Serve) Handler(w http.ResponseWriter, r *http.Request) {
 				select {
 				case blockChannel <- block:
 					written = true
-				case <- time.After(time.Second):
-					if atomic.LoadInt32(terminated) != 0 {
-						quit = true
-					}
+				case <- terminated:
+					quit = true
 				}
 			}
 
@@ -124,7 +120,7 @@ func (this *Serve) Handler(w http.ResponseWriter, r *http.Request) {
 
 		if err != nil {
 			Log.Debug.Printf("Failed to write block to HTTP: %s", err.Error())
-			atomic.StoreInt32(terminated, 1)
+			terminated <- true
 			break
 		}
 	}
