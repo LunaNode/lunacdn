@@ -137,7 +137,7 @@ func MakePeerList(cfg *Config, exitChannel chan bool) *PeerList {
 			if len(peerAddrParts) == 1 {
 				peerAddr += ":" + defaultPortStr
 			}
-			this.discoverable[peerAddr] = time.Now().Add(-1 * CONNECT_INTERVAL * time.Second)
+			this.discoverable[peerAddr] = time.Now().Add(-1 * CONNECT_INTERVAL)
 		}
 	}
 
@@ -181,7 +181,7 @@ func MakePeerList(cfg *Config, exitChannel chan bool) *PeerList {
 	// print out peer speed statistics
 	go func() {
 		for {
-			time.Sleep(PEER_STATS_INTERVAL * time.Second)
+			time.Sleep(PEER_STATS_INTERVAL)
 			this.mu.Lock()
 			for _, peer := range this.peers {
 				peer.mu.Lock()
@@ -586,7 +586,7 @@ func (this *PeerList) refreshPeers() {
 
 	// also try the initial connect map
 	for addr, lastTime := range this.discoverable {
-		if time.Now().After(lastTime.Add(CONNECT_INTERVAL * time.Second)) {
+		if time.Now().After(lastTime.Add(CONNECT_INTERVAL)) {
 			this.discoverable[addr] = time.Now()
 			go func(addr string) {
 				Log.Info.Printf("Attempting to connect to %s", addr)
@@ -614,7 +614,7 @@ func (this *PeerList) refreshPeer(peer *Peer) {
 
 	// try to connect to the peer if CONNECT_INTERVAL seconds has elapsed
 	// note that updating peer.conn is done in handleConnection, and only after the HELLO exchange succeeds
-	if peer.conn == nil && time.Now().After(peer.lastConnectTime.Add(CONNECT_INTERVAL * time.Second)) {
+	if peer.conn == nil && time.Now().After(peer.lastConnectTime.Add(CONNECT_INTERVAL)) {
 		peer.lastConnectTime = time.Now()
 
 		go func() {
@@ -636,7 +636,7 @@ func (this *PeerList) refreshPeer(peer *Peer) {
 	}
 
 	// announce locally cached blocks every ANNOUNCE_INTERVAL seconds
-	if peer.conn != nil && time.Now().After(peer.lastAnnounceTime.Add(ANNOUNCE_INTERVAL * time.Second)) {
+	if peer.conn != nil && time.Now().After(peer.lastAnnounceTime.Add(ANNOUNCE_INTERVAL)) {
 		peer.lastAnnounceTime = time.Now()
 
 		// we can't call cache while we have the lock, so we do with an asynchronous callback

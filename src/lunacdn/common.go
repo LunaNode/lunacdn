@@ -3,6 +3,7 @@ package lunacdn
 import "math/rand"
 import "crypto/md5"
 import "strconv"
+import "time"
 
 // peer protocol constants
 const HEADER_CONSTANT = 229
@@ -16,13 +17,13 @@ const PROTO_UPLOAD_PART = 6
 const PROTO_HELLO = 7
 
 // how frequently to attempt to connect to disconnected peers
-const CONNECT_INTERVAL = 10
+const CONNECT_INTERVAL = 10 * time.Second
 
 // how frequently to announce blocks
-const ANNOUNCE_INTERVAL = 10
+const ANNOUNCE_INTERVAL = 10 * time.Second
 
 // how frequently to print peer stats
-const PEER_STATS_INTERVAL = 60
+const PEER_STATS_INTERVAL = 60 * time.Second
 
 // default speed to assume from untested peer (microseconds)
 const DEFAULT_PEER_SPEED = 10 * 1000 * 1000
@@ -40,7 +41,7 @@ const SERVE_BUFFER_BLOCKS = 5
 const HASH_BYTES = 16
 
 // how long to cache failed file downloads
-const DOWNLOAD_ERROR_CACHE_TIME = 30
+const DOWNLOAD_ERROR_CACHE_TIME = 30 * time.Second
 
 func randSeq(n int) string {
 	var letters = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")

@@ -138,7 +138,7 @@ func (this *Serve) CheckError(path string) bool {
 	if !ok {
 		return true
 	} else {
-		if time.Now().After(errorTime.Add(DOWNLOAD_ERROR_CACHE_TIME * time.Second)) {
+		if time.Now().After(errorTime.Add(DOWNLOAD_ERROR_CACHE_TIME)) {
 			delete(this.recentErrors, path)
 			return true
 		} else {
