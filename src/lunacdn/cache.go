@@ -10,6 +10,7 @@ import "time"
 import "crypto/md5"
 import "encoding/hex"
 import "fmt"
+import "io"
 import "io/ioutil"
 import "os"
 import "strconv"
@@ -380,7 +381,7 @@ func (this *Cache) RegisterFile(filePath string, path string) bool {
 
 	for {
 		readCount, err := fin.Read(buf)
-		if err != nil {
+		if err != nil && err != io.EOF {
 			Log.Error.Printf("Error encountered while reading from file [%s]: %s", filePath, err.Error())
 			return false
 		}
