@@ -43,6 +43,7 @@ type CacheFile struct {
 	PathHash string
 	Length int64
 	NumBlocks uint16
+	BlockSize uint32
 	Blocks []*CacheBlock
 }
 
@@ -93,7 +94,7 @@ func (this *Cache) blockPath(block *CacheBlock) string {
 	return fmt.Sprintf("%s/%s_%d.obj", this.cacheLocation, block.File.PathHash, block.Index)
 }
 
-func (this *Cache) NotifyFile(hash string, length int64, numBlocks uint16) {
+func (this *Cache) NotifyFile(hash string, length int64, numBlocks uint16, blockSize uint32) {
 	this.mu.Lock()
 	defer this.mu.Unlock()
 
@@ -103,10 +104,10 @@ func (this *Cache) NotifyFile(hash string, length int64, numBlocks uint16) {
 		return
 	}
 
-	file := this.appendFile(hash, length, numBlocks)
+	file := this.appendFile(hash, length, numBlocks, blockSize)
 
 	// create a .meta file so we can retrieve the CacheFile data on restart
-	metaString := fmt.Sprintf("%s:%d:%d", file.PathHash, file.Length, file.NumBlocks)
+	metaString := fmt.Sprintf("%s:%d:%d:%d", file.PathHash, file.Length, file.NumBlocks, file.BlockSize)
 	metaFile := fmt.Sprintf("%s/%s.meta", this.cacheLocation, file.PathHash)
 	err := ioutil.WriteFile(metaFile, []byte(metaString), 0644)
 	if err != nil {
@@ -114,15 +115,17 @@ func (this *Cache) NotifyFile(hash string, length int64, numBlocks uint16) {
 	}
 }
 
-func (this *Cache) appendFile(hash string, length int64, numBlocks uint16) *CacheFile {
+func (this *Cache) appendFile(hash string, length int64, numBlocks uint16, blockSize uint32) *CacheFile {
 	// warn if BLOCK_SIZE seems to have mismatch
-	expectedNumBlocks := uint16((length + BLOCK_SIZE - 1) / BLOCK_SIZE) // number blocks needed to store the length with blocks of size BLOCK_SIZE
+	expectedNumBlocks := uint16((length + int64(blockSize) - 1) / int64(blockSize)) // number blocks needed to store the length with blocks of size BLOCK_SIZE
 	if numBlocks != expectedNumBlocks {
-		Log.Warn.Printf("Warning: mismatched numBlocks for file %s (%d/%d), desynchronized BLOCK_SIZE parameters?", hash, numBlocks, expectedNumBlocks)
+		Log.Error.Printf("Mismatched numBlocks for file %s (%d, expected %d)", hash, numBlocks, expectedNumBlocks)
+	} else if blockSize != BLOCK_SIZE {
+		Log.Warn.Printf("File %s has different number of blocks than local BLOCK_SIZE parameter (file: %d, local: %d)", hash, blockSize, BLOCK_SIZE)
 	}
 
 	// add the file
-	file := &CacheFile{PathHash: hash, Length: length, NumBlocks: numBlocks}
+	file := &CacheFile{PathHash: hash, Length: length, NumBlocks: numBlocks, BlockSize: blockSize}
 	for i := 0; i < int(numBlocks); i++ {
 		block := CacheBlock{File: file, Index: i, Offset: int64(i) * BLOCK_SIZE, OnDisk: false}
 		file.Blocks = append(file.Blocks, &block)
@@ -280,6 +283,7 @@ func (this *Cache) PrepareAnnounce(callback prepareAnnounceCallback) {
 				Hash: file.PathHash,
 				Length: file.Length,
 				NumBlocks: file.NumBlocks,
+				BlockSize: file.BlockSize,
 				Indexes: indexes,
 			}
 			announceFiles = append(announceFiles, announceFile)
@@ -308,19 +312,20 @@ func (this *Cache) Load() {
 			}
 			parts := strings.Split(string(metaString), ":")
 
-			if len(parts) != 3 {
-				Log.Warn.Printf("Error while processing [%s]: metadata does not contain exactly two colons", f.Name())
+			if len(parts) != 4 {
+				Log.Warn.Printf("Error while processing [%s]: metadata does not contain exactly four parts", f.Name())
 				continue
 			}
 
 			metaLength, err1 := strconv.ParseInt(parts[1], 10, 64)
 			numBlocks, err2 := strconv.ParseUint(parts[2], 10, 16)
+			blockSize, err2 := strconv.ParseUint(parts[3], 10, 32)
 			if err1 != nil || err2 != nil {
 				Log.Warn.Printf("Error while processing [%s]: metadata contains invalid file length or number blocks", f.Name())
 				continue
 			}
 
-			this.appendFile(parts[0], metaLength, uint16(numBlocks))
+			this.appendFile(parts[0], metaLength, uint16(numBlocks), uint32(blockSize))
 		}
 	}
 
@@ -396,7 +401,7 @@ func (this *Cache) RegisterFile(filePath string, path string) bool {
 	}
 
 	// create .meta file
-	metaString := fmt.Sprintf("%s:%d:%d", pathHash, length, index)
+	metaString := fmt.Sprintf("%s:%d:%d:%d", pathHash, length, index, BLOCK_SIZE)
 	metaFile := fmt.Sprintf("%s/%s.meta", this.cacheLocation, pathHash)
 	err = ioutil.WriteFile(metaFile, []byte(metaString), 0644)
 	if err != nil {
@@ -405,7 +410,7 @@ func (this *Cache) RegisterFile(filePath string, path string) bool {
 	}
 
 	this.mu.Lock()
-	cacheFile := this.appendFile(pathHash, int64(length), uint16(index))
+	cacheFile := this.appendFile(pathHash, int64(length), uint16(index), BLOCK_SIZE)
 	for _, block := range cacheFile.Blocks {
 		// no need to lock on block -- we still have this.mu locked, so no one could have pointer to the file yet
 		block.OnDisk = true

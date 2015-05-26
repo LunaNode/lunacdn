@@ -152,9 +152,9 @@ func (this *CacheReader) Read(p []byte) (int, error) {
 
 		if pOffset < len(p) && this.offset < this.file.Length {
 			// need to read more bytes, load the next block
-			blockIndex := int(this.offset / BLOCK_SIZE)
+			blockIndex := int(this.offset / int64(this.file.BlockSize))
 			this.currentBlock = this.cache.DownloadRead(this.file, blockIndex, true)
-			this.currentBlockOffset = int64(blockIndex) * BLOCK_SIZE
+			this.currentBlockOffset = int64(blockIndex) * int64(this.file.BlockSize)
 
 			if this.currentBlock == nil {
 				// add to error cache since this download failed apparently

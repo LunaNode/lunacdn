@@ -24,6 +24,7 @@ type AnnounceFile struct {
 	Hash string
 	Length int64
 	NumBlocks uint16
+	BlockSize uint32
 	Indexes []int
 }
 
@@ -69,6 +70,7 @@ func protocolReadAnnounce(buf *bytes.Buffer) []AnnounceFile {
 		// int64 file length and uint16 num blocks
 		binary.Read(buf, binary.BigEndian, &file.Length)
 		binary.Read(buf, binary.BigEndian, &file.NumBlocks)
+		binary.Read(buf, binary.BigEndian, &file.BlockSize)
 
 		// find out what blocks the peer has
 		// block indexes are length-encoded, we call each index-length pair a section
@@ -181,6 +183,7 @@ func protocolSendAnnounce(files []AnnounceFile) []*bytes.Buffer {
 			currentPacket.Write(hashBytes)
 			binary.Write(currentPacket, binary.BigEndian, file.Length)
 			binary.Write(currentPacket, binary.BigEndian, file.NumBlocks)
+			binary.Write(currentPacket, binary.BigEndian, file.BlockSize)
 
 			// determine how many sections to include and add them
 			numSections := len(fileSections) - sectionStart
