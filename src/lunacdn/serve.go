@@ -58,7 +58,6 @@ func (this *CacheReader) Read(p []byte) (int, error) {
 	if this.offset >= this.file.Length {
 		return 0, io.EOF
 	}
-	Log.Debug.Printf("receive read request offset=%d len=%d", this.offset, len(p))
 
 	pOffset := 0
 	t := 0
@@ -132,6 +131,7 @@ func (this *Serve) handler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// pass to ServeContent to handle the complicated stuff
+	Log.Debug.Printf("Request for [%s]: in progress", shortPath)
 	reader := MakeCacheReader(this.cache, this, shortPath, file)
 	http.ServeContent(w, r, pathParts[len(pathParts) - 1], time.Time{}, reader)
 }
