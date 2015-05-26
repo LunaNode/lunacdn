@@ -26,6 +26,11 @@ type CacheReader struct {
 
 	currentBlock []byte
 	currentBlockOffset int64
+
+	readAheadLock sync.Mutex
+	readAheadRunning bool
+	readAheadBlocks map[int][]byte // from block index to block
+	readAheadStart int // block index to start grabbing
 }
 
 func MakeServe(cfg *Config, cache *Cache) *Serve {
@@ -111,7 +116,7 @@ func MakeCacheReader(cache *Cache, serve *Serve, path string, file *CacheFile) *
 	this.serve = serve
 	this.path = path
 	this.file = file
-	this.offset = 0
+	this.readAheadBlocks = make(map[int][]byte)
 	return this
 }
 
@@ -152,8 +157,24 @@ func (this *CacheReader) Read(p []byte) (int, error) {
 
 		if pOffset < len(p) && this.offset < this.file.Length {
 			// need to read more bytes, load the next block
+			// we try to get from read-ahead buffer, otherwise have to read it manually
 			blockIndex := int(this.offset / int64(this.file.BlockSize))
-			this.currentBlock = this.cache.DownloadRead(this.file, blockIndex, true)
+
+			this.readAheadLock.Lock()
+			readAheadBlock := this.readAheadBlocks[blockIndex]
+			if blockIndex < int(this.file.NumBlocks) && !this.readAheadRunning {
+				this.readAheadStart = blockIndex + 1
+				go this.readAhead()
+			}
+			this.readAheadLock.Unlock()
+
+			if readAheadBlock == nil {
+				Log.Debug.Printf("read ahead fail %d", blockIndex)
+				this.currentBlock = this.cache.DownloadRead(this.file, blockIndex, true)
+			} else {
+				Log.Debug.Printf("read ahead success %d", blockIndex)
+				this.currentBlock = readAheadBlock
+			}
 			this.currentBlockOffset = int64(blockIndex) * int64(this.file.BlockSize)
 
 			if this.currentBlock == nil {
@@ -167,4 +188,48 @@ func (this *CacheReader) Read(p []byte) (int, error) {
 	}
 
 	return pOffset, nil
+}
+
+func (this *CacheReader) readAhead() {
+	this.readAheadLock.Lock()
+	if this.readAheadRunning {
+		this.readAheadLock.Unlock()
+		return
+	}
+	this.readAheadRunning = true
+	this.readAheadLock.Unlock()
+
+	for {
+		// find index to read (or return if none found)
+		readIndex := -1
+		this.readAheadLock.Lock()
+		for i := this.readAheadStart; i < this.readAheadStart + SERVE_BUFFER_BLOCKS && i < int(this.file.NumBlocks); i++ {
+			_, already := this.readAheadBlocks[i]
+			if !already {
+				readIndex = i
+				break
+			}
+		}
+
+		if readIndex == -1 {
+			this.readAheadRunning = false
+			this.readAheadLock.Unlock()
+			return
+		}
+		this.readAheadLock.Unlock()
+
+		// read the block
+		Log.Debug.Printf("read-aheading running on %d", readIndex)
+		block := this.cache.DownloadRead(this.file, readIndex, true)
+
+		// insert block and cleanup
+		this.readAheadLock.Lock()
+		this.readAheadBlocks[readIndex] = block
+		for blockIndex := range this.readAheadBlocks {
+			if blockIndex < this.readAheadStart || blockIndex >= this.readAheadStart + SERVE_BUFFER_BLOCKS {
+				delete(this.readAheadBlocks, blockIndex)
+			}
+		}
+		this.readAheadLock.Unlock()
+	}
 }
