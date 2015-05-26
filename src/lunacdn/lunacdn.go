@@ -33,6 +33,7 @@ func Run(cfgPath string) {
 
 	var cache Cache
 	if cfg.CacheAsFile {
+		cache = MakeFileCache(cfg)
 	} else {
 		cache = MakeObjCache(cfg, peerList)
 	}

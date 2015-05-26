@@ -7,8 +7,6 @@ On cache miss, we try to serve the block from a peer via PeerList instance.
 
 import "sync"
 import "time"
-import "crypto/md5"
-import "encoding/hex"
 import "fmt"
 import "io"
 import "io/ioutil"
@@ -285,8 +283,6 @@ func (this *ObjCache) accessedBlock(updateBlock *ObjBlock) {
 
 func (this *ObjCache) PrepareAnnounce(callback prepareAnnounceCallback) {
 	this.mu.Lock()
-	defer this.mu.Unlock()
-
 	announceFiles := make([]AnnounceFile, 0)
 
 	for _, file := range this.files {
@@ -308,6 +304,7 @@ func (this *ObjCache) PrepareAnnounce(callback prepareAnnounceCallback) {
 			announceFiles = append(announceFiles, announceFile)
 		}
 	}
+	this.mu.Unlock()
 
 	callback(announceFiles)
 }
@@ -399,7 +396,9 @@ func (this *ObjCache) RegisterFile(filePath string, path string) bool {
 
 	for {
 		readCount, err := fin.Read(buf)
-		if err != nil && err != io.EOF {
+		if err == io.EOF {
+			break
+		} else if err != nil {
 			Log.Error.Printf("Error encountered while reading from file [%s]: %s", filePath, err.Error())
 			return false
 		}

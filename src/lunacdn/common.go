@@ -2,6 +2,7 @@ package lunacdn
 
 import "math/rand"
 import "crypto/md5"
+import "encoding/hex"
 import "strconv"
 import "time"
 
@@ -25,6 +26,9 @@ const ANNOUNCE_INTERVAL = 10 * time.Second
 
 // how frequently to print peer stats
 const PEER_STATS_INTERVAL = 60 * time.Second
+
+// if using FileCache, how often to scan filesystem
+const FILECACHE_SCAN_INTERVAL = 120 * time.Second
 
 // default speed to assume from untested peer
 const DEFAULT_PEER_SPEED = 10 * time.Second
