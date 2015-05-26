@@ -137,15 +137,10 @@ func (this *CacheReader) Read(p []byte) (int, error) {
 	}
 
 	pOffset := 0
-	t := 0
 
 	for {
-		t++
-		if t > 5 {
-			os.Exit(1)
-		}
 		if this.currentBlock != nil && this.offset >= this.currentBlockOffset && this.offset < this.currentBlockOffset + int64(len(this.currentBlock)) {
-			copyBytes := copy(this.currentBlock[this.offset - this.currentBlockOffset:], p[pOffset:])
+			copyBytes := copy(p[pOffset:], this.currentBlock[this.offset - this.currentBlockOffset:])
 			this.offset += int64(copyBytes)
 			pOffset += copyBytes
 		}
