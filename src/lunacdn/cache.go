@@ -14,7 +14,7 @@ type CacheFile interface {
 type prepareAnnounceCallback func([]AnnounceFile)
 
 type Cache interface {
-	NotifyFile(hash string, legth int64, numBlocks uint16, blockSize uint32)
+	NotifyFile(hash string, length int64, numBlocks uint16, blockSize uint32)
 	DownloadInit(path string) (CacheFile, error)
 	DownloadInitHash(pathHash string) (CacheFile, error)
 	DownloadRead(file CacheFile, index int, tryPeers bool) []byte
