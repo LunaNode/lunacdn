@@ -176,7 +176,7 @@ func (this *Cache) DownloadRead(file *CacheFile, index int, tryPeers bool) []byt
 
 	// download from peers
 	if tryPeers {
-		bytes := this.peerList.DownloadBlock(file.PathHash, index, 30 * time.Second)
+		bytes := this.peerList.DownloadBlock(file.PathHash, index)
 
 		if bytes != nil {
 			block.Data = bytes

@@ -85,9 +85,9 @@ type Peer struct {
 	// set of blocks this peer advertises
 	availableBlocks map[PeerBlock]bool
 
-	// indicator for how quickly we download a block from this peer (microseconds)
+	// indicator for how quickly we download a block from this peer
 	// recomputed as rollingSpeed = 0.3 * speed + 0.7 * rollingSpeed
-	rollingSpeed int64
+	rollingSpeed time.Duration
 
 	// pending downloads from random download id => Download struct
 	pendingDownloads map[int64]*PeerDownload
@@ -185,7 +185,7 @@ func MakePeerList(cfg *Config, exitChannel chan bool) *PeerList {
 			this.mu.Lock()
 			for _, peer := range this.peers {
 				peer.mu.Lock()
-				Log.Info.Printf("Stats with %s: rollingSpeed=%.2f ms", peer.addr, float32(peer.rollingSpeed) / 1000)
+				Log.Info.Printf("Stats with %s: rollingSpeed=%.2f ms", peer.addr, float32(peer.rollingSpeed.Nanoseconds()) / 1000 / 1000)
 				peer.mu.Unlock()
 			}
 			this.mu.Unlock()
@@ -316,7 +316,6 @@ func (this *PeerList) handleConnection(conn *net.TCPConn, peer *Peer, discovered
 
 		packet := bytes.NewBuffer(buf[:packetLen-4])
 
-		// TODO: we can push processing to another thread probably? need to copy bytes though?
 		if packetType == PROTO_ANNOUNCE {
 			this.handleAnnounce(peer, protocolReadAnnounce(packet), true)
 		} else if packetType == PROTO_ANNOUNCE_CONTINUE {
@@ -327,9 +326,15 @@ func (this *PeerList) handleConnection(conn *net.TCPConn, peer *Peer, discovered
 		} else if packetType == PROTO_UPLOAD_PART {
 			downloadId, part := protocolReadUploadPart(packet)
 			this.handleUploadPart(peer, downloadId, part)
+		} else if packetType == PROTO_UPLOAD_FAIL {
+			downloadId := protocolReadUploadFail(packet)
+			this.handleUploadFail(peer, downloadId)
 		} else if packetType == PROTO_DOWNLOAD {
 			downloadId, fileHash, blockIndex := protocolReadDownload(packet)
 			this.handleDownload(peer, downloadId, fileHash, blockIndex)
+		} else if packetType == PROTO_DOWNLOAD_CANCEL {
+			downloadId := protocolReadDownloadCancel(packet)
+			this.handleDownloadCancel(peer, downloadId)
 		} else {
 			Log.Info.Printf("Disconnected from %s: unknown packet type %d", peer.addr, packetType)
 			break
@@ -408,9 +413,8 @@ func (this *PeerList) handleUploadPart(peer *Peer, downloadId int64, part []byte
 
 		// updating rolling speed, but only if this was a large enough block
 		if download.Length >= BLOCK_SIZE / 4 {
-			downloadTime := time.Now().Sub(download.StartTime).Nanoseconds() / 1000 // convert to microseconds
-			timePerBlock := float64(downloadTime) * BLOCK_SIZE / float64(download.Length)
-			peer.rollingSpeed = int64(float64(peer.rollingSpeed) * 0.7 + timePerBlock * 0.3)
+			timePerBlock := float64(time.Now().Sub(download.StartTime)) * BLOCK_SIZE / float64(download.Length)
+			peer.rollingSpeed = time.Duration(float64(peer.rollingSpeed) * 0.7 + timePerBlock * 0.3)
 
 			if peer.rollingSpeed <= 0 {
 				peer.rollingSpeed = 1
@@ -419,20 +423,34 @@ func (this *PeerList) handleUploadPart(peer *Peer, downloadId int64, part []byte
 	}
 }
 
+func (this *PeerList) handleUploadFail(peer *Peer, downloadId int64) {
+	peer.mu.Lock()
+	defer peer.mu.Unlock()
+
+	download, ok := peer.pendingDownloads[downloadId]
+	if ok {
+		download.Bytes = nil
+		download.NotifyChannel <- false
+		delete(peer.pendingDownloads, downloadId)
+	}
+}
+
 func (this *PeerList) handleDownload(peer *Peer, downloadId int64, fileHash string, blockIndex int) {
 	cacheFile := this.cache.DownloadInitHash(fileHash)
 	if cacheFile == nil {
 		Log.Warn.Printf("Failed to handle download from %s: cache doesn't contain file %s", peer.addr, fileHash)
+		peer.conn.Write(protocolSendUploadFail(downloadId).Bytes())
 		return
 	}
 
 	bytes := this.cache.DownloadRead(cacheFile, blockIndex, false)
 	if bytes == nil {
 		Log.Warn.Printf("Failed to handle download from %s: cache did not provide block %s/%d", peer.addr, fileHash, blockIndex)
+		peer.conn.Write(protocolSendUploadFail(downloadId).Bytes())
 		return
 	}
 
-	Log.Debug.Printf("Handling download from %s, providing block %s/%d", peer.addr, fileHash, blockIndex)
+	Log.Debug.Printf("Handling download %d from %s, providing block %s/%d", downloadId, peer.addr, fileHash, blockIndex)
 
 	go func() {
 		peer.mu.Lock()
@@ -451,6 +469,10 @@ func (this *PeerList) handleDownload(peer *Peer, downloadId int64, fileHash stri
 			peer.mu.Unlock()
 		}
 	}()
+}
+
+func (this *PeerList) handleDownloadCancel(peer *Peer, downloadId int64) {
+	// TODO
 }
 
 /*
@@ -480,7 +502,7 @@ func (this *PeerList) startDownload(peer *Peer, peerBlock PeerBlock) *PeerDownlo
 			StartTime: time.Now(),
 		}
 		peer.pendingDownloads[download.Id] = download
-		Log.Debug.Printf("Initialized download from %s (id=%d)", peer.addr, download.Id)
+		Log.Debug.Printf("Initialized download from %s (id=%d, blk=%s/%d)", peer.addr, download.Id, peerBlock.FileHash, peerBlock.Index)
 		return download
 	} else {
 		Log.Debug.Printf("Failed to initialize download from %s: peer is disconnected", peer.addr)
@@ -502,12 +524,12 @@ func (this *PeerList) cancelDownload(peer *Peer, downloadId int64) {
 /*
  * Local request (from cache) to retrieve a block from peers.
  */
-func (this *PeerList) DownloadBlock(fileHash string, blockIndex int, timeout time.Duration) []byte {
+func (this *PeerList) DownloadBlock(fileHash string, blockIndex int) []byte {
 	peerBlock := PeerBlock{FileHash: fileHash, Index: blockIndex}
-	startTime := time.Now()
+	ignorePeers := make(map[int64]bool) // set of peers that we shouldn't download from
 
-	for time.Now().Before(startTime.Add(timeout)) {
-		peer := this.findPeerWithBlock(peerBlock)
+	for attempt := 0; attempt < DOWNLOAD_MAX_ATTEMPTS; attempt++ {
+		peer := this.findPeerWithBlock(peerBlock, ignorePeers)
 		if peer == nil {
 			Log.Warn.Printf("Failed to find peer with block %s/%d", peerBlock.FileHash, peerBlock.Index)
 			return nil
@@ -515,16 +537,29 @@ func (this *PeerList) DownloadBlock(fileHash string, blockIndex int, timeout tim
 
 		download := this.startDownload(peer, peerBlock)
 		if download == nil {
+			ignorePeers[peer.peerId] = true
 			continue
+		}
+
+		timeout := peer.rollingSpeed * 4
+		if timeout < DOWNLOAD_MIN_TIMEOUT {
+			timeout = DOWNLOAD_MIN_TIMEOUT
 		}
 
 		select {
 			case <- download.NotifyChannel:
-				return download.Bytes
-			case <- time.After(timeout - time.Now().Sub(startTime)):
-				Log.Warn.Printf("Download from peer %s has timed out, failed request", peer.addr)
+				if download.Bytes != nil {
+					return download.Bytes
+				} else {
+					Log.Warn.Printf("Download from peer %s failed", peer.addr)
+					ignorePeers[peer.peerId] = true
+					continue
+				}
+			case <- time.After(timeout):
+				Log.Warn.Printf("Download from peer %s timed out", peer.addr)
 				this.cancelDownload(peer, download.Id)
-				return nil
+				ignorePeers[peer.peerId] = true
+				continue
 		}
 	}
 
@@ -535,7 +570,7 @@ func (this *PeerList) DownloadBlock(fileHash string, blockIndex int, timeout tim
  * Returns a peer who has announced the block, or nil if no such peer exists.
  * We prefer peers that have higher download speeds.
  */
-func (this *PeerList) findPeerWithBlock(peerBlock PeerBlock) *Peer {
+func (this *PeerList) findPeerWithBlock(peerBlock PeerBlock, ignorePeers map[int64]bool) *Peer {
 	// we first identify the set of peers that have the block available
 	//  (both connected and announced block recently)
 	// out of those, we select each one with probability proportional to 1/rollingSpeed
@@ -544,14 +579,13 @@ func (this *PeerList) findPeerWithBlock(peerBlock PeerBlock) *Peer {
 
 	peerWeights := make(map[*Peer]int64)
 	var totalWeight int64
-	for _, peer := range this.peers {
+	for peerId, peer := range this.peers {
 		peer.mu.Lock()
-		_, ok := peer.availableBlocks[peerBlock]
-		if ok && peer.conn != nil {
+		if peer.availableBlocks[peerBlock] && peer.conn != nil && !ignorePeers[peerId] {
 			if peer.rollingSpeed == 0 {
-				peerWeights[peer] = DEFAULT_PEER_SPEED
+				peerWeights[peer] = int64(DEFAULT_PEER_SPEED)
 			} else {
-				peerWeights[peer] = DEFAULT_PEER_SPEED * 100000 / peer.rollingSpeed
+				peerWeights[peer] = int64(DEFAULT_PEER_SPEED * 100000 / peer.rollingSpeed)
 			}
 			totalWeight += peerWeights[peer]
 		}

@@ -107,6 +107,12 @@ func protocolReadUploadPart(buf *bytes.Buffer) (int64, []byte) {
 	return downloadId, part
 }
 
+func protocolReadUploadFail(buf *bytes.Buffer) int64 {
+	var downloadId int64
+	binary.Read(buf, binary.BigEndian, &downloadId)
+	return downloadId
+}
+
 func protocolReadDownload(buf *bytes.Buffer) (int64, string, int) {
 	var downloadId int64
 	binary.Read(buf, binary.BigEndian, &downloadId)
@@ -114,6 +120,12 @@ func protocolReadDownload(buf *bytes.Buffer) (int64, string, int) {
 	var blockIndex int32
 	binary.Read(buf, binary.BigEndian, &blockIndex)
 	return downloadId, fileHash, int(blockIndex)
+}
+
+func protocolReadDownloadCancel(buf *bytes.Buffer) int64 {
+	var downloadId int64
+	binary.Read(buf, binary.BigEndian, &downloadId)
+	return downloadId
 }
 
 var fakeLength uint16 // placeholder for length
@@ -277,6 +289,16 @@ func protocolSendUploadPart(downloadId int64, data []byte) *bytes.Buffer {
 	binary.Write(buf, binary.BigEndian, fakeLength)
 	binary.Write(buf, binary.BigEndian, downloadId)
 	buf.Write(data)
+	protocolAssignLength(buf)
+	return buf
+}
+
+func protocolSendUploadFail(downloadId int64) *bytes.Buffer {
+	buf := new(bytes.Buffer)
+	buf.WriteByte(HEADER_CONSTANT)
+	buf.WriteByte(PROTO_UPLOAD_FAIL)
+	binary.Write(buf, binary.BigEndian, fakeLength)
+	binary.Write(buf, binary.BigEndian, downloadId)
 	protocolAssignLength(buf)
 	return buf
 }
