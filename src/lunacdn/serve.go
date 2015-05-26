@@ -11,24 +11,24 @@ import "io"
 
 type Serve struct {
 	mu sync.Mutex
-	cache *Cache
+	cache Cache
 
 	// map from path to error time of recent files that failed to fully download
 	recentErrors map[string]time.Time
 }
 
 type CacheReader struct {
-	cache *Cache
+	cache Cache
 	serve *Serve
 	path string
-	file *CacheFile
+	file CacheFile
 	offset int64
 
 	currentBlock []byte
 	currentBlockOffset int64
 }
 
-func MakeServe(cfg *Config, cache *Cache) *Serve {
+func MakeServe(cfg *Config, cache Cache) *Serve {
 	this := new(Serve)
 	this.cache = cache
 	this.recentErrors = make(map[string]time.Time)
@@ -59,8 +59,8 @@ func (this *Serve) handler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// grab the CacheFile object for reading
-	file := this.cache.DownloadInit(shortPath)
-	if file == nil {
+	file, err := this.cache.DownloadInit(shortPath)
+	if err != nil {
 		this.notFound(w)
 		Log.Debug.Printf("Request for [%s]: file not found", shortPath)
 		return
@@ -105,7 +105,7 @@ func (this *Serve) temporarilyUnavailable(w http.ResponseWriter) {
 	fmt.Fprint(w, "503")
 }
 
-func MakeCacheReader(cache *Cache, serve *Serve, path string, file *CacheFile) *CacheReader {
+func MakeCacheReader(cache Cache, serve *Serve, path string, file CacheFile) *CacheReader {
 	this := new(CacheReader)
 	this.cache = cache
 	this.serve = serve
@@ -120,7 +120,7 @@ func (this *CacheReader) Seek(offset int64, whence int) (int64, error) {
 	if whence == os.SEEK_CUR {
 		actualOffset = this.offset + offset
 	} else if whence == os.SEEK_END {
-		actualOffset = this.file.Length + offset
+		actualOffset = this.file.GetLength() + offset
 	}
 
 	if actualOffset < 0 {
@@ -132,7 +132,7 @@ func (this *CacheReader) Seek(offset int64, whence int) (int64, error) {
 }
 
 func (this *CacheReader) Read(p []byte) (int, error) {
-	if this.offset >= this.file.Length {
+	if this.offset >= this.file.GetLength() {
 		return 0, io.EOF
 	}
 
@@ -150,11 +150,11 @@ func (this *CacheReader) Read(p []byte) (int, error) {
 			pOffset += copyBytes
 		}
 
-		if pOffset < len(p) && this.offset < this.file.Length {
+		if pOffset < len(p) && this.offset < this.file.GetLength() {
 			// need to read more bytes, load the next block
-			blockIndex := int(this.offset / int64(this.file.BlockSize))
+			blockIndex := int(this.offset / int64(this.file.GetBlockSize()))
 			this.currentBlock = this.cache.DownloadRead(this.file, blockIndex, true)
-			this.currentBlockOffset = int64(blockIndex) * int64(this.file.BlockSize)
+			this.currentBlockOffset = int64(blockIndex) * int64(this.file.GetBlockSize())
 
 			if this.currentBlock == nil {
 				// add to error cache since this download failed apparently

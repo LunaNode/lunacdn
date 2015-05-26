@@ -30,7 +30,13 @@ func Run(cfgPath string) {
 	cfg := LoadConfig(cfgPath)
 	exitChannel := make(chan bool)
 	peerList := MakePeerList(cfg, exitChannel)
-	cache := MakeCache(cfg, peerList)
+
+	var cache Cache
+	if cfg.CacheAsFile {
+	} else {
+		cache = MakeObjCache(cfg, peerList)
+	}
+
 	peerList.SetCache(cache)
 
 	if cfg.ModeServe {

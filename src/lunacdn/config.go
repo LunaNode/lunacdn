@@ -12,6 +12,7 @@ type Config struct {
 	CachePath string
 	CacheMemory int
 	CacheDisk int
+	CacheAsFile bool
 }
 
 type ConfigMeta struct {

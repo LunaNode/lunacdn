@@ -79,7 +79,6 @@ type Peer struct {
 	conn *net.TCPConn
 	lastConnectTime time.Time
 	lastAnnounceTime time.Time
-	cache *Cache
 	peerId int64
 
 	// set of blocks this peer advertises
@@ -111,7 +110,7 @@ type PeerList struct {
 	authorizedIPs map[string]bool
 	discoverable map[string]time.Time
 	listener *net.TCPListener
-	cache *Cache
+	cache Cache
 
 	// temporary random identifier for this peer
 	peerId int64
@@ -195,7 +194,7 @@ func MakePeerList(cfg *Config, exitChannel chan bool) *PeerList {
 	return this
 }
 
-func (this *PeerList) SetCache(cache *Cache) {
+func (this *PeerList) SetCache(cache Cache) {
 	this.cache = cache
 }
 
@@ -436,8 +435,8 @@ func (this *PeerList) handleUploadFail(peer *Peer, downloadId int64) {
 }
 
 func (this *PeerList) handleDownload(peer *Peer, downloadId int64, fileHash string, blockIndex int) {
-	cacheFile := this.cache.DownloadInitHash(fileHash)
-	if cacheFile == nil {
+	cacheFile, err := this.cache.DownloadInitHash(fileHash)
+	if err != nil {
 		Log.Warn.Printf("Failed to handle download from %s: cache doesn't contain file %s", peer.addr, fileHash)
 		peer.conn.Write(protocolSendUploadFail(downloadId).Bytes())
 		return
