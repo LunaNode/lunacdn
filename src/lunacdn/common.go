@@ -102,3 +102,8 @@ func extractStrings(b []byte) []string {
 	// any trailing bytes discarded, no null terminator!
 	return str
 }
+
+func pathToHash(path string) string {
+	hashArray := md5.Sum([]byte(path))
+	return hex.EncodeToString(hashArray[:])
+}

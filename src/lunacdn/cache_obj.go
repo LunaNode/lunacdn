@@ -63,11 +63,6 @@ func (this *ObjFile) GetBlockSize() uint32 {
 	return this.BlockSize
 }
 
-func pathToHash(path string) string {
-	hashArray := md5.Sum([]byte(path))
-	return hex.EncodeToString(hashArray[:])
-}
-
 type ObjCache struct {
 	mu sync.Mutex
 
