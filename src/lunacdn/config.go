@@ -13,6 +13,11 @@ type Config struct {
 	CacheMemory int
 	CacheDisk int
 	CacheAsFile bool
+
+	RedirectEnable bool
+	RedirectGeoipPath string
+	RedirectIP string
+	RedirectLocation string
 }
 
 type ConfigMeta struct {

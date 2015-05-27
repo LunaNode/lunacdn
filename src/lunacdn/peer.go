@@ -34,8 +34,10 @@ import "sync"
 import "time"
 import "strings"
 import "encoding/binary"
+import "math"
 import "math/rand"
 import "bytes"
+import "github.com/oschwald/geoip2-golang"
 
 /*
 Synchronization strategy
@@ -80,6 +82,7 @@ type Peer struct {
 	lastConnectTime time.Time
 	lastAnnounceTime time.Time
 	peerId int64
+	location string
 
 	// set of blocks this peer advertises
 	availableBlocks map[PeerBlock]bool
@@ -114,6 +117,11 @@ type PeerList struct {
 
 	// temporary random identifier for this peer
 	peerId int64
+
+	// redirect-related fields
+	myLocation string
+	myIP net.IP
+	geoip *geoip2.Reader
 }
 
 func MakePeerList(cfg *Config, exitChannel chan bool) *PeerList {
@@ -141,6 +149,19 @@ func MakePeerList(cfg *Config, exitChannel chan bool) *PeerList {
 	}
 
 	Log.Info.Printf("Loaded %d authorized IPs", len(this.authorizedIPs))
+
+	// set up redirect parameters
+	this.myLocation = cfg.RedirectLocation
+	if cfg.RedirectEnable {
+		Log.Info.Printf("Loading geoip database")
+		db, err := geoip2.Open(cfg.RedirectGeoipPath)
+		if err != nil {
+			Log.Error.Printf("Failed to load geoip data: %s; redirects are disabled", err.Error())
+		} else {
+			this.geoip = db
+			this.myIP = net.ParseIP(cfg.RedirectIP)
+		}
+	}
 
 	// initialize server socket
 	Log.Info.Printf("Listening for backend connections on [%s]", cfg.BackendBind)
@@ -213,8 +234,8 @@ func (this *PeerList) handleConnection(conn *net.TCPConn, peer *Peer, discovered
 		return
 	}
 
-	conn.Write(protocolSendHello(this.peerId).Bytes())
-	helloSuccess, helloPeerId := protocolReadHello(conn)
+	conn.Write(protocolSendHello(this.peerId, this.myLocation).Bytes())
+	helloSuccess, helloPeerId, helloPeerLocation := protocolReadHello(conn)
 	if !helloSuccess {
 		return
 	}
@@ -281,6 +302,7 @@ func (this *PeerList) handleConnection(conn *net.TCPConn, peer *Peer, discovered
 		return
 	}
 	peer.conn = conn
+	peer.location = helloPeerLocation
 	peer.mu.Unlock()
 	Log.Info.Printf("Successful connection with %s", peer.addr)
 
@@ -288,6 +310,7 @@ func (this *PeerList) handleConnection(conn *net.TCPConn, peer *Peer, discovered
 	buf := make([]byte, 65536)
 
 	for {
+		conn.SetReadDeadline(time.Now().Add(2 * ANNOUNCE_INTERVAL)) // timeout to detect disconnects
 		count, err := conn.Read(header)
 		if err != nil {
 			Log.Info.Printf("Disconnected from %s: %s", peer.addr, err.Error())
@@ -606,6 +629,61 @@ func (this *PeerList) findPeerWithBlock(peerBlock PeerBlock, ignorePeers map[int
 
 	Log.Error.Printf("Failed to select random peer, random number out of range?!")
 	return nil
+}
+
+// extracted from golang-geo library (https://github.com/kellydunn/golang-geo/blob/master/point.go)
+func (this *PeerList) ipDistance(record *geoip2.City, ip net.IP) float64 {
+	ipRecord, err := this.geoip.City(ip)
+	if err != nil {
+		Log.Warn.Printf("Geoip query failed: %s", err.Error())
+		return math.MaxFloat64
+	}
+
+	dLat := (record.Location.Latitude - ipRecord.Location.Latitude) * (math.Pi / 180.0)
+	dLon := (record.Location.Longitude - ipRecord.Location.Longitude) * (math.Pi / 180.0)
+	lat1 := record.Location.Latitude * (math.Pi / 180.0)
+	lat2 := ipRecord.Location.Latitude * (math.Pi / 180.0)
+	a1 := math.Sin(dLat/2) * math.Sin(dLat/2)
+	a2 := math.Sin(dLon/2) * math.Sin(dLon/2) * math.Cos(lat1) * math.Cos(lat2)
+	a := a1 + a2
+	return 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
+}
+
+/*
+ * Returns base URL of closest peer to provided IP, or empty string if we shouldn't redirect
+ */
+func (this *PeerList) findClosestPeer(clientIp net.IP) string {
+	if this.geoip == nil || this.myIP == nil {
+		return ""
+	}
+
+	record, err := this.geoip.City(clientIp)
+	if err != nil {
+		Log.Warn.Printf("Geoip query failed: %s", err.Error())
+		return ""
+	}
+
+	peerIps := make(map[string]net.IP)
+	this.mu.Lock()
+	for _, peer := range this.peers {
+		if peer.conn != nil {
+			peerIps[peer.location] = net.ParseIP(strings.Split(peer.addr, ":")[0])
+		}
+	}
+	this.mu.Unlock()
+
+	minDistance := this.ipDistance(record, this.myIP)
+	minLocation := ""
+
+	for peerLocation, peerIp := range peerIps {
+		dist := this.ipDistance(record, peerIp)
+		if dist < minDistance {
+			minDistance = dist
+			minLocation = peerLocation
+		}
+	}
+
+	return minLocation
 }
 
 func (this *PeerList) refreshPeers() {

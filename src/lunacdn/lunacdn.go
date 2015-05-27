@@ -41,7 +41,7 @@ func Run(cfgPath string) {
 	peerList.SetCache(cache)
 
 	if cfg.ModeServe {
-		MakeServe(cfg, cache)
+		MakeServe(cfg, cache, peerList)
 	}
 
 	<- exitChannel

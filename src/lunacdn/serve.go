@@ -1,5 +1,6 @@
 package lunacdn
 
+import "net"
 import "net/http"
 import "fmt"
 import "strings"
@@ -12,6 +13,8 @@ import "io"
 type Serve struct {
 	mu sync.Mutex
 	cache Cache
+	peerList *PeerList
+	redirectEnable bool
 
 	// map from path to error time of recent files that failed to fully download
 	recentErrors map[string]time.Time
@@ -28,10 +31,12 @@ type CacheReader struct {
 	currentBlockOffset int64
 }
 
-func MakeServe(cfg *Config, cache Cache) *Serve {
+func MakeServe(cfg *Config, cache Cache, peerList *PeerList) *Serve {
 	this := new(Serve)
 	this.cache = cache
+	this.peerList = peerList
 	this.recentErrors = make(map[string]time.Time)
+	this.redirectEnable = cfg.RedirectEnable
 
 	http.HandleFunc("/", this.handler)
 	Log.Info.Printf("Starting HTTP server on [%s]", cfg.HttpBind)
@@ -64,6 +69,23 @@ func (this *Serve) handler(w http.ResponseWriter, r *http.Request) {
 		this.notFound(w)
 		Log.Debug.Printf("Request for [%s]: file not found", shortPath)
 		return
+	}
+
+	// see if we should redirect user to another node
+	if this.redirectEnable {
+		ip := net.ParseIP(strings.Split(r.RemoteAddr, ":")[0])
+
+		if ip != nil {
+			redirectBase := this.peerList.findClosestPeer(ip)
+
+			if redirectBase != "" {
+				Log.Debug.Printf("Redirecting %s to %s", r.RemoteAddr, redirectBase)
+				http.Redirect(w, r, redirectBase + shortPath, 302)
+				return
+			}
+		} else {
+			Log.Debug.Printf("Redirect enabled but failed to parse IP %s", strings.Split(r.RemoteAddr, ":")[0])
+		}
 	}
 
 	// pass to ServeContent to handle the complicated stuff
