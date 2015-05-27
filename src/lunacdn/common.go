@@ -54,6 +54,8 @@ const DOWNLOAD_MAX_ATTEMPTS = 3
 // minimum timeout for block download from peer
 const DOWNLOAD_MIN_TIMEOUT = time.Second
 
+const HEXADECIMAL_CHARS = "0123456789abcdef"
+
 func randSeq(n int) string {
 	var letters = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
     b := make([]rune, n)
@@ -107,7 +109,7 @@ func extractStrings(b []byte) []string {
 	return str
 }
 
-func pathToHash(path string) string {
-	hashArray := md5.Sum([]byte(path))
+func hexHash(str string) string {
+	hashArray := md5.Sum([]byte(str))
 	return hex.EncodeToString(hashArray[:])
 }

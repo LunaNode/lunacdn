@@ -20,7 +20,7 @@ type FCFile struct {
 
 // implement CacheFile interface
 func (this FCFile) GetPathHash() string {
-	return pathToHash(this.Path)
+	return hexHash(this.Path)
 }
 func (this FCFile) GetLength() int64 {
 	return this.Length
@@ -58,7 +58,7 @@ func (this *FileCache) NotifyFile(hash string, length int64, umBlocks uint16, bl
 }
 
 func (this *FileCache) DownloadInit(path string) (CacheFile, error) {
-	return this.DownloadInitHash(pathToHash(path))
+	return this.DownloadInitHash(hexHash(path))
 }
 
 func (this *FileCache) DownloadInitHash(pathHash string) (CacheFile, error) {
@@ -138,7 +138,7 @@ func (this *FileCache) Load() {
 			if len(pathParts) == 2 {
 				subPath := pathParts[1]
 				Log.Debug.Printf("Registering file %s", subPath)
-				files[pathToHash(subPath)] = FCFile{Path: subPath, Length: info.Size()}
+				files[hexHash(subPath)] = FCFile{Path: subPath, Length: info.Size()}
 			}
 		}
 

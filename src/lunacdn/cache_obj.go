@@ -15,6 +15,7 @@ import "strconv"
 import "runtime"
 import "strings"
 import "errors"
+import "path/filepath"
 
 /*
 Synchronization strategy:
@@ -100,7 +101,8 @@ func MakeObjCache(cfg *Config, peerList *PeerList) *ObjCache {
 }
 
 func (this *ObjCache) blockPath(block *ObjBlock) string {
-	return fmt.Sprintf("%s/%s_%d.obj", this.cacheLocation, block.File.PathHash, block.Index)
+	blockSubdir := hexHash(fmt.Sprintf("%s%d", block.File.PathHash, block.Index))
+	return filepath.Join(this.cacheLocation, "obj", blockSubdir[:2], fmt.Sprintf("%s_%d.obj", block.File.PathHash, block.Index))
 }
 
 func (this *ObjCache) NotifyFile(hash string, length int64, numBlocks uint16, blockSize uint32) {
@@ -117,7 +119,7 @@ func (this *ObjCache) NotifyFile(hash string, length int64, numBlocks uint16, bl
 
 	// create a .meta file so we can retrieve the CacheFile data on restart
 	metaString := fmt.Sprintf("%s:%d:%d:%d", file.PathHash, file.Length, file.NumBlocks, file.BlockSize)
-	metaFile := fmt.Sprintf("%s/%s.meta", this.cacheLocation, file.PathHash)
+	metaFile := fmt.Sprintf("%s/meta/%s/%s.meta", this.cacheLocation, file.PathHash[0:2], file.PathHash)
 	err := ioutil.WriteFile(metaFile, []byte(metaString), 0644)
 	if err != nil {
 		Log.Warn.Printf("Failed to write file metadata to [%s]: %s", metaFile, err.Error())
@@ -144,7 +146,7 @@ func (this *ObjCache) appendFile(hash string, length int64, numBlocks uint16, bl
 }
 
 func (this *ObjCache) DownloadInit(path string) (CacheFile, error) {
-	return this.DownloadInitHash(pathToHash(path))
+	return this.DownloadInitHash(hexHash(path))
 }
 
 func (this *ObjCache) DownloadInitHash(pathHash string) (CacheFile, error) {
@@ -310,73 +312,130 @@ func (this *ObjCache) PrepareAnnounce(callback prepareAnnounceCallback) {
 }
 
 func (this *ObjCache) Load() {
-	// scan the cacheLocation for .meta and .obj files, and add them to our structures
-	files, err := ioutil.ReadDir(this.cacheLocation)
-
-	if err != nil {
-		Log.Error.Printf("Failed to list contents of cache location: %s", err.Error())
-		return
+	// exit if cacheLocation doesn't exist
+	if _, err := os.Stat(this.cacheLocation); os.IsNotExist(err) {
+		Log.Error.Printf("Could not load: %s does not exist", this.cacheLocation)
+		os.Exit(1)
 	}
 
-	// first pass: look for .meta
-	for _, f := range files {
-		if strings.HasSuffix(f.Name(), ".meta") {
-			metaString, err := ioutil.ReadFile(this.cacheLocation + "/" + f.Name())
+	// create subdirectories if they don't exist already
+	for _, subtype := range []string{"meta", "obj"} {
+		testDir := filepath.Join(this.cacheLocation, subtype, "00")
+		if _, err := os.Stat(testDir); os.IsNotExist(err) {
+			Log.Info.Printf("%s directories missing, creating them now", subtype)
+			for i := 0; i < 256; i++ {
+				createDir := filepath.Join(this.cacheLocation, subtype, string(HEXADECIMAL_CHARS[i / 16]) + string(HEXADECIMAL_CHARS[i % 16]))
+				err := os.MkdirAll(createDir, 0755)
+				if err != nil {
+					panic(err)
+				}
+			}
+		}
+	}
+
+	// scan the cacheLocation for .meta and .obj files, and add them to our structures
+	// first look for .meta
+	filepath.Walk(filepath.Join(this.cacheLocation, "meta"), func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			Log.Warn.Printf("Could not scan into %s", path)
+			return nil
+		}
+
+		if info.Mode().IsRegular() && strings.HasSuffix(path, ".meta") {
+			// verify correct subdirectory / filename format
+			dirName := filepath.Base(filepath.Dir(path))
+			fileName := filepath.Base(path)
+			if len(dirName) != 2 || !strings.HasPrefix(fileName, dirName) {
+				Log.Warn.Printf("Skipping invalid metadata filename %s", path)
+				return nil
+			}
+
+			// read the metadata and append to file list
+			metaString, err := ioutil.ReadFile(path)
 			if err != nil {
-				Log.Warn.Printf("Error while reading [%s]: %s", f.Name(), err.Error())
-				continue
+				Log.Warn.Printf("Error while reading [%s]: %s", path, err.Error())
+				return nil
 			}
 			parts := strings.Split(string(metaString), ":")
 
 			if len(parts) != 4 {
-				Log.Warn.Printf("Error while processing [%s]: metadata does not contain exactly four parts", f.Name())
-				continue
+				Log.Warn.Printf("Error while processing [%s]: metadata does not contain exactly four parts", path)
+				return nil
+			} else if parts[0] != strings.Split(fileName, ".meta")[0] {
+				Log.Warn.Printf("Error while processing [%s]: hash in metadata mismatch with filename", path)
+				return nil
 			}
 
 			metaLength, err1 := strconv.ParseInt(parts[1], 10, 64)
 			numBlocks, err2 := strconv.ParseUint(parts[2], 10, 16)
 			blockSize, err2 := strconv.ParseUint(parts[3], 10, 32)
 			if err1 != nil || err2 != nil {
-				Log.Warn.Printf("Error while processing [%s]: metadata contains invalid file length or number blocks", f.Name())
-				continue
+				Log.Warn.Printf("Error while processing [%s]: metadata contains invalid file length or number blocks", path)
+				return nil
 			}
 
 			this.appendFile(parts[0], metaLength, uint16(numBlocks), uint32(blockSize))
 		}
-	}
 
-	// second pass: look for .obj
+		return nil
+	})
+
+	// then look for .obj
 	countBlocks := 0
-	for _, f := range files {
-		if strings.HasSuffix(f.Name(), ".obj") {
+	filepath.Walk(filepath.Join(this.cacheLocation, "obj"), func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			Log.Warn.Printf("Could not scan into %s", path)
+			return nil
+		}
+
+		if info.Mode().IsRegular() && strings.HasSuffix(path, ".obj") {
+			// verify correct subdirectory / filename format
+			dirName := filepath.Base(filepath.Dir(path))
+			fileName := filepath.Base(path)
+			if len(dirName) != 2 {
+				Log.Warn.Printf("Skipping invalid obj filename %s", path)
+				return nil
+			}
+
 			// parse hash_idx.obj => hash, idx
-			nameParts := strings.Split(strings.Split(f.Name(), ".obj")[0], "_")
+			nameParts := strings.Split(strings.Split(fileName, ".obj")[0], "_")
 			if len(nameParts) != 2 {
-				Log.Warn.Printf("Error while processing [%s]: filename has bad format (expected hash_idx.obj): %s %d", f.Name())
-				continue
+				Log.Warn.Printf("Error while processing [%s]: filename has bad format (expected hash_idx.obj)", path)
+				return nil
 			}
 
 			blockFile := nameParts[0]
 			blockIndex, err := strconv.ParseInt(nameParts[1], 10, 32)
 			if err != nil {
-				Log.Warn.Printf("Error while processing [%s]: bad block index in filename", f.Name())
-				continue
+				Log.Warn.Printf("Error while processing [%s]: bad block index in filename", path)
+				return nil
 			}
 
+			// make sure subdirectory matches what we expect
+			//  (block files go in subdirectory according to hash of file pathhash / block index)
+			expectedSubdir := hexHash(fmt.Sprintf("%s%d", blockFile, blockIndex))[0:2]
+			if expectedSubdir != dirName {
+				Log.Warn.Printf("Error while processing [%s]: block in unexpected subdirectory", path)
+				return nil
+			}
+
+			// make sure file exists, and associate with that file
 			cacheFile, ok := this.files[blockFile]
 			if !ok {
-				Log.Warn.Printf("Error while processing [%s]: no .meta for file [%s]", f.Name(), blockFile)
-				continue
+				Log.Warn.Printf("Error while processing [%s]: no .meta for file [%s]", path, blockFile)
+				return nil
 			}
 			if blockIndex < 0 || blockIndex >= int64(len(cacheFile.Blocks)) {
-				Log.Warn.Printf("Error while processing [%s]: index out of bounds (corresponding file has %d blocks)", f.Name(), len(cacheFile.Blocks))
-				continue
+				Log.Warn.Printf("Error while processing [%s]: index out of bounds (corresponding file has %d blocks)", path, len(cacheFile.Blocks))
+				return nil
 			}
 
 			cacheFile.Blocks[blockIndex].OnDisk = true
 			countBlocks++
 		}
-	}
+
+		return nil
+	})
 
 	Log.Info.Printf("Loaded %d files and %d blocks", len(this.files), countBlocks)
 }
@@ -390,7 +449,7 @@ func (this *ObjCache) RegisterFile(filePath string, path string) bool {
 	defer fin.Close()
 
 	buf := make([]byte, BLOCK_SIZE)
-	pathHash := pathToHash(path)
+	pathHash := hexHash(path)
 	length := 0
 	index := 0
 
@@ -404,7 +463,8 @@ func (this *ObjCache) RegisterFile(filePath string, path string) bool {
 		}
 
 		// commit bytes to next object file
-		objPath := fmt.Sprintf("%s/%s_%d.obj", this.cacheLocation, pathHash, index)
+		objSubdir := hexHash(fmt.Sprintf("%s%d", pathHash, index))
+		objPath := fmt.Sprintf("%s/obj/%s/%s_%d.obj", this.cacheLocation, objSubdir[0:2], pathHash, index)
 		err = ioutil.WriteFile(objPath, buf[:readCount], 0644)
 		if err != nil {
 			Log.Error.Printf("Error encountered while writing to [%s] for file registration: %s", objPath, err.Error())
@@ -420,7 +480,7 @@ func (this *ObjCache) RegisterFile(filePath string, path string) bool {
 
 	// create .meta file
 	metaString := fmt.Sprintf("%s:%d:%d:%d", pathHash, length, index, BLOCK_SIZE)
-	metaFile := fmt.Sprintf("%s/%s.meta", this.cacheLocation, pathHash)
+	metaFile := fmt.Sprintf("%s/meta/%s/%s.meta", this.cacheLocation, pathHash[0:2], pathHash)
 	err = ioutil.WriteFile(metaFile, []byte(metaString), 0644)
 	if err != nil {
 		Log.Error.Printf("Failed to write file metadata to [%s]: %s", metaFile, err.Error())
