@@ -119,7 +119,7 @@ func (this *ObjCache) NotifyFile(hash string, length int64, numBlocks uint16, bl
 
 	// create a .meta file so we can retrieve the CacheFile data on restart
 	metaString := fmt.Sprintf("%s:%d:%d:%d", file.PathHash, file.Length, file.NumBlocks, file.BlockSize)
-	metaFile := fmt.Sprintf("%s/meta/%s/%s.meta", this.cacheLocation, file.PathHash[0:2], file.PathHash)
+	metaFile := filepath.Join(this.cacheLocation, "meta", file.PathHash[0:2], fmt.Sprintf("%s.meta", file.PathHash))
 	err := ioutil.WriteFile(metaFile, []byte(metaString), 0644)
 	if err != nil {
 		Log.Warn.Printf("Failed to write file metadata to [%s]: %s", metaFile, err.Error())
@@ -464,7 +464,7 @@ func (this *ObjCache) RegisterFile(filePath string, path string) bool {
 
 		// commit bytes to next object file
 		objSubdir := hexHash(fmt.Sprintf("%s%d", pathHash, index))
-		objPath := fmt.Sprintf("%s/obj/%s/%s_%d.obj", this.cacheLocation, objSubdir[0:2], pathHash, index)
+		objPath := filepath.Join(this.cacheLocation, "obj", objSubdir[0:2], fmt.Sprintf("%s_%d.obj", pathHash, index))
 		err = ioutil.WriteFile(objPath, buf[:readCount], 0644)
 		if err != nil {
 			Log.Error.Printf("Error encountered while writing to [%s] for file registration: %s", objPath, err.Error())
@@ -480,7 +480,7 @@ func (this *ObjCache) RegisterFile(filePath string, path string) bool {
 
 	// create .meta file
 	metaString := fmt.Sprintf("%s:%d:%d:%d", pathHash, length, index, BLOCK_SIZE)
-	metaFile := fmt.Sprintf("%s/meta/%s/%s.meta", this.cacheLocation, pathHash[0:2], pathHash)
+	metaFile := filepath.Join(this.cacheLocation, "meta", pathHash[0:2], fmt.Sprintf("%s.meta", pathHash))
 	err = ioutil.WriteFile(metaFile, []byte(metaString), 0644)
 	if err != nil {
 		Log.Error.Printf("Failed to write file metadata to [%s]: %s", metaFile, err.Error())
