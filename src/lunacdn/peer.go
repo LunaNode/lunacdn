@@ -185,7 +185,7 @@ func MakePeerList(cfg *Config, exitChannel chan bool) *PeerList {
 				continue
 			}
 			Log.Info.Printf("New connection from %s", conn.RemoteAddr().String())
-			this.handleConnection(conn, nil, "")
+			go this.handleConnection(conn, nil, "")
 		}
 
 		exitChannel <- true
