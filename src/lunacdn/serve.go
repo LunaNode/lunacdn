@@ -1,5 +1,6 @@
 package lunacdn
 
+import "net"
 import "net/http"
 import "fmt"
 import "strings"
@@ -11,17 +12,19 @@ import "io"
 
 type Serve struct {
 	mu sync.Mutex
-	cache *Cache
+	cache Cache
+	peerList *PeerList
+	redirectEnable bool
 
 	// map from path to error time of recent files that failed to fully download
 	recentErrors map[string]time.Time
 }
 
 type CacheReader struct {
-	cache *Cache
+	cache Cache
 	serve *Serve
 	path string
-	file *CacheFile
+	file CacheFile
 	offset int64
 
 	currentBlock []byte
@@ -33,10 +36,12 @@ type CacheReader struct {
 	readAheadStart int // block index to start grabbing
 }
 
-func MakeServe(cfg *Config, cache *Cache) *Serve {
+func MakeServe(cfg *Config, cache Cache, peerList *PeerList) *Serve {
 	this := new(Serve)
 	this.cache = cache
+	this.peerList = peerList
 	this.recentErrors = make(map[string]time.Time)
+	this.redirectEnable = cfg.RedirectEnable
 
 	http.HandleFunc("/", this.handler)
 	Log.Info.Printf("Starting HTTP server on [%s]", cfg.HttpBind)
@@ -64,11 +69,28 @@ func (this *Serve) handler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// grab the CacheFile object for reading
-	file := this.cache.DownloadInit(shortPath)
-	if file == nil {
+	file, err := this.cache.DownloadInit(shortPath)
+	if err != nil {
 		this.notFound(w)
 		Log.Debug.Printf("Request for [%s]: file not found", shortPath)
 		return
+	}
+
+	// see if we should redirect user to another node
+	if this.redirectEnable {
+		ip := net.ParseIP(strings.Split(r.RemoteAddr, ":")[0])
+
+		if ip != nil {
+			redirectBase := this.peerList.findClosestPeer(ip)
+
+			if redirectBase != "" {
+				Log.Debug.Printf("Redirecting %s to %s", r.RemoteAddr, redirectBase)
+				http.Redirect(w, r, redirectBase + shortPath, 302)
+				return
+			}
+		} else {
+			Log.Debug.Printf("Redirect enabled but failed to parse IP %s", strings.Split(r.RemoteAddr, ":")[0])
+		}
 	}
 
 	// pass to ServeContent to handle the complicated stuff
@@ -110,7 +132,7 @@ func (this *Serve) temporarilyUnavailable(w http.ResponseWriter) {
 	fmt.Fprint(w, "503")
 }
 
-func MakeCacheReader(cache *Cache, serve *Serve, path string, file *CacheFile) *CacheReader {
+func MakeCacheReader(cache Cache, serve *Serve, path string, file CacheFile) *CacheReader {
 	this := new(CacheReader)
 	this.cache = cache
 	this.serve = serve
@@ -125,7 +147,7 @@ func (this *CacheReader) Seek(offset int64, whence int) (int64, error) {
 	if whence == os.SEEK_CUR {
 		actualOffset = this.offset + offset
 	} else if whence == os.SEEK_END {
-		actualOffset = this.file.Length + offset
+		actualOffset = this.file.GetLength() + offset
 	}
 
 	if actualOffset < 0 {
@@ -137,45 +159,38 @@ func (this *CacheReader) Seek(offset int64, whence int) (int64, error) {
 }
 
 func (this *CacheReader) Read(p []byte) (int, error) {
-	if this.offset >= this.file.Length {
+	if this.offset >= this.file.GetLength() {
 		return 0, io.EOF
 	}
 
 	pOffset := 0
-	t := 0
 
 	for {
-		t++
-		if t > 5 {
-			os.Exit(1)
-		}
 		if this.currentBlock != nil && this.offset >= this.currentBlockOffset && this.offset < this.currentBlockOffset + int64(len(this.currentBlock)) {
-			copyBytes := copy(this.currentBlock[this.offset - this.currentBlockOffset:], p[pOffset:])
+			copyBytes := copy(p[pOffset:], this.currentBlock[this.offset - this.currentBlockOffset:])
 			this.offset += int64(copyBytes)
 			pOffset += copyBytes
 		}
 
-		if pOffset < len(p) && this.offset < this.file.Length {
+		if pOffset < len(p) && this.offset < this.file.GetLength() {
 			// need to read more bytes, load the next block
 			// we try to get from read-ahead buffer, otherwise have to read it manually
-			blockIndex := int(this.offset / int64(this.file.BlockSize))
+			blockIndex := int(this.offset / int64(this.file.GetBlockSize()))
 
 			this.readAheadLock.Lock()
 			readAheadBlock := this.readAheadBlocks[blockIndex]
-			if blockIndex < int(this.file.NumBlocks) && !this.readAheadRunning {
+			if blockIndex < int(this.file.GetNumBlocks()) && !this.readAheadRunning {
 				this.readAheadStart = blockIndex + 1
 				go this.readAhead()
 			}
 			this.readAheadLock.Unlock()
 
 			if readAheadBlock == nil {
-				Log.Debug.Printf("read ahead fail %d", blockIndex)
 				this.currentBlock = this.cache.DownloadRead(this.file, blockIndex, true)
 			} else {
-				Log.Debug.Printf("read ahead success %d", blockIndex)
 				this.currentBlock = readAheadBlock
 			}
-			this.currentBlockOffset = int64(blockIndex) * int64(this.file.BlockSize)
+			this.currentBlockOffset = int64(blockIndex) * int64(this.file.GetBlockSize())
 
 			if this.currentBlock == nil {
 				// add to error cache since this download failed apparently
@@ -203,7 +218,7 @@ func (this *CacheReader) readAhead() {
 		// find index to read (or return if none found)
 		readIndex := -1
 		this.readAheadLock.Lock()
-		for i := this.readAheadStart; i < this.readAheadStart + SERVE_BUFFER_BLOCKS && i < int(this.file.NumBlocks); i++ {
+		for i := this.readAheadStart; i < this.readAheadStart + SERVE_BUFFER_BLOCKS && i < int(this.file.GetNumBlocks()); i++ {
 			_, already := this.readAheadBlocks[i]
 			if !already {
 				readIndex = i

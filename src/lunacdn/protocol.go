@@ -28,30 +28,38 @@ type AnnounceFile struct {
 	Indexes []int
 }
 
-func protocolReadHello(conn *net.TCPConn) (bool, int64) {
-	tbuf := make([]byte, 10)
+func protocolReadHello(conn *net.TCPConn) (bool, int64, string) {
+	headerBuf := make([]byte, 4)
+	_, err := conn.Read(headerBuf)
+	if err != nil {
+		Log.Warn.Printf("Bad HELLO: error reading four-byte header")
+		return false, 0, ""
+	} else if headerBuf[0] != HEADER_CONSTANT {
+		Log.Warn.Printf("Bad HELLO: incorrect header constant")
+		return false, 0, ""
+	} else if headerBuf[1] != PROTO_HELLO {
+		Log.Warn.Printf("Bad HELLO: incorrect packet HELLO header")
+		return false, 0, ""
+	}
+
+	length := binary.BigEndian.Uint16(headerBuf[2:4])
+	if length < 11 {
+		Log.Warn.Printf("Bad HELLO: length < 11")
+		return false, 0, ""
+	}
+
+	tbuf := make([]byte, length - 4)
 	numRead, err := conn.Read(tbuf)
 	buf := bytes.NewBuffer(tbuf)
-	if numRead != 10 || err != nil {
-		Log.Warn.Printf("Bad HELLO: didn't get ten bytes")
-		return false, 0
-	}
-
-	header, _ := buf.ReadByte()
-	if header != HEADER_CONSTANT {
-		Log.Warn.Printf("Bad HELLO: incorrect header constant")
-		return false, 0
-	}
-
-	pktType, _ := buf.ReadByte()
-	if pktType != PROTO_HELLO {
-		Log.Warn.Printf("Bad HELLO: incorrect packet HELLO header")
-		return false, 0
+	if uint16(numRead) != length - 4 || err != nil {
+		Log.Warn.Printf("Bad HELLO: didn't get enough bytes")
+		return false, 0, ""
 	}
 
 	var peerId int64
 	binary.Read(buf, binary.BigEndian, &peerId)
-	return true, peerId
+	peerLocation := protocolReadString(buf)
+	return true, peerId, peerLocation
 }
 
 func protocolReadAnnounce(buf *bytes.Buffer) []AnnounceFile {
@@ -107,6 +115,12 @@ func protocolReadUploadPart(buf *bytes.Buffer) (int64, []byte) {
 	return downloadId, part
 }
 
+func protocolReadUploadFail(buf *bytes.Buffer) int64 {
+	var downloadId int64
+	binary.Read(buf, binary.BigEndian, &downloadId)
+	return downloadId
+}
+
 func protocolReadDownload(buf *bytes.Buffer) (int64, string, int) {
 	var downloadId int64
 	binary.Read(buf, binary.BigEndian, &downloadId)
@@ -114,6 +128,12 @@ func protocolReadDownload(buf *bytes.Buffer) (int64, string, int) {
 	var blockIndex int32
 	binary.Read(buf, binary.BigEndian, &blockIndex)
 	return downloadId, fileHash, int(blockIndex)
+}
+
+func protocolReadDownloadCancel(buf *bytes.Buffer) int64 {
+	var downloadId int64
+	binary.Read(buf, binary.BigEndian, &downloadId)
+	return downloadId
 }
 
 var fakeLength uint16 // placeholder for length
@@ -124,11 +144,15 @@ func protocolAssignLength(buf *bytes.Buffer) {
 }
 
 // HELLO is sent on connect and does not have length
-func protocolSendHello(peerId int64) *bytes.Buffer {
+func protocolSendHello(peerId int64, peerLocation string) *bytes.Buffer {
 	buf := new(bytes.Buffer)
 	buf.WriteByte(HEADER_CONSTANT)
 	buf.WriteByte(PROTO_HELLO)
+	binary.Write(buf, binary.BigEndian, fakeLength)
 	binary.Write(buf, binary.BigEndian, peerId)
+	buf.Write([]byte(peerLocation))
+	buf.WriteByte(0)
+	protocolAssignLength(buf)
 	return buf
 }
 
@@ -217,7 +241,7 @@ func protocolSendAnnounce(files []AnnounceFile) []*bytes.Buffer {
 		}
 	}
 
-	if currentNumFiles > 0 {
+	if currentNumFiles > 0 || len(packets) == 0 {
 		buf := new(bytes.Buffer)
 		buf.WriteByte(HEADER_CONSTANT)
 		if len(packets) == 0 {
@@ -277,6 +301,16 @@ func protocolSendUploadPart(downloadId int64, data []byte) *bytes.Buffer {
 	binary.Write(buf, binary.BigEndian, fakeLength)
 	binary.Write(buf, binary.BigEndian, downloadId)
 	buf.Write(data)
+	protocolAssignLength(buf)
+	return buf
+}
+
+func protocolSendUploadFail(downloadId int64) *bytes.Buffer {
+	buf := new(bytes.Buffer)
+	buf.WriteByte(HEADER_CONSTANT)
+	buf.WriteByte(PROTO_UPLOAD_FAIL)
+	binary.Write(buf, binary.BigEndian, fakeLength)
+	binary.Write(buf, binary.BigEndian, downloadId)
 	protocolAssignLength(buf)
 	return buf
 }

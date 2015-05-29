@@ -34,8 +34,11 @@ import "sync"
 import "time"
 import "strings"
 import "encoding/binary"
+import "math"
 import "math/rand"
 import "bytes"
+import "io"
+import "github.com/oschwald/geoip2-golang"
 
 /*
 Synchronization strategy
@@ -79,15 +82,16 @@ type Peer struct {
 	conn *net.TCPConn
 	lastConnectTime time.Time
 	lastAnnounceTime time.Time
-	cache *Cache
 	peerId int64
+	location string
+	connecting bool // whether currently connecting
 
 	// set of blocks this peer advertises
 	availableBlocks map[PeerBlock]bool
 
-	// indicator for how quickly we download a block from this peer (microseconds)
+	// indicator for how quickly we download a block from this peer
 	// recomputed as rollingSpeed = 0.3 * speed + 0.7 * rollingSpeed
-	rollingSpeed int64
+	rollingSpeed time.Duration
 
 	// pending downloads from random download id => Download struct
 	pendingDownloads map[int64]*PeerDownload
@@ -111,10 +115,15 @@ type PeerList struct {
 	authorizedIPs map[string]bool
 	discoverable map[string]time.Time
 	listener *net.TCPListener
-	cache *Cache
+	cache Cache
 
 	// temporary random identifier for this peer
 	peerId int64
+
+	// redirect-related fields
+	myLocation string
+	myIP net.IP
+	geoip *geoip2.Reader
 }
 
 func MakePeerList(cfg *Config, exitChannel chan bool) *PeerList {
@@ -143,6 +152,19 @@ func MakePeerList(cfg *Config, exitChannel chan bool) *PeerList {
 
 	Log.Info.Printf("Loaded %d authorized IPs", len(this.authorizedIPs))
 
+	// set up redirect parameters
+	this.myLocation = cfg.RedirectLocation
+	if cfg.RedirectEnable {
+		Log.Info.Printf("Loading geoip database")
+		db, err := geoip2.Open(cfg.RedirectGeoipPath)
+		if err != nil {
+			Log.Error.Printf("Failed to load geoip data: %s; redirects are disabled", err.Error())
+		} else {
+			this.geoip = db
+			this.myIP = net.ParseIP(cfg.RedirectIP)
+		}
+	}
+
 	// initialize server socket
 	Log.Info.Printf("Listening for backend connections on [%s]", cfg.BackendBind)
 	addr, err := net.ResolveTCPAddr("tcp", cfg.BackendBind)
@@ -164,7 +186,7 @@ func MakePeerList(cfg *Config, exitChannel chan bool) *PeerList {
 				continue
 			}
 			Log.Info.Printf("New connection from %s", conn.RemoteAddr().String())
-			this.handleConnection(conn, nil, "")
+			go this.handleConnection(conn, nil, "")
 		}
 
 		exitChannel <- true
@@ -185,7 +207,7 @@ func MakePeerList(cfg *Config, exitChannel chan bool) *PeerList {
 			this.mu.Lock()
 			for _, peer := range this.peers {
 				peer.mu.Lock()
-				Log.Info.Printf("Stats with %s: rollingSpeed=%.2f ms", peer.addr, float32(peer.rollingSpeed) / 1000)
+				Log.Info.Printf("Stats with %s: rollingSpeed=%.2f ms", peer.addr, float32(peer.rollingSpeed.Nanoseconds()) / 1000 / 1000)
 				peer.mu.Unlock()
 			}
 			this.mu.Unlock()
@@ -195,7 +217,7 @@ func MakePeerList(cfg *Config, exitChannel chan bool) *PeerList {
 	return this
 }
 
-func (this *PeerList) SetCache(cache *Cache) {
+func (this *PeerList) SetCache(cache Cache) {
 	this.cache = cache
 }
 
@@ -214,8 +236,9 @@ func (this *PeerList) handleConnection(conn *net.TCPConn, peer *Peer, discovered
 		return
 	}
 
-	conn.Write(protocolSendHello(this.peerId).Bytes())
-	helloSuccess, helloPeerId := protocolReadHello(conn)
+	conn.Write(protocolSendHello(this.peerId, this.myLocation).Bytes())
+	conn.SetReadDeadline(time.Now().Add(CONNECT_TIMEOUT))
+	helloSuccess, helloPeerId, helloPeerLocation := protocolReadHello(conn)
 	if !helloSuccess {
 		return
 	}
@@ -282,6 +305,7 @@ func (this *PeerList) handleConnection(conn *net.TCPConn, peer *Peer, discovered
 		return
 	}
 	peer.conn = conn
+	peer.location = helloPeerLocation
 	peer.mu.Unlock()
 	Log.Info.Printf("Successful connection with %s", peer.addr)
 
@@ -289,7 +313,8 @@ func (this *PeerList) handleConnection(conn *net.TCPConn, peer *Peer, discovered
 	buf := make([]byte, 65536)
 
 	for {
-		count, err := conn.Read(header)
+		conn.SetReadDeadline(time.Now().Add(2 * ANNOUNCE_INTERVAL)) // timeout to detect disconnects
+		count, err := io.ReadFull(conn, header)
 		if err != nil {
 			Log.Info.Printf("Disconnected from %s: %s", peer.addr, err.Error())
 			break
@@ -305,7 +330,7 @@ func (this *PeerList) handleConnection(conn *net.TCPConn, peer *Peer, discovered
 
 		packetType := header[1]
 		packetLen := binary.BigEndian.Uint16(header[2:4])
-		count, err = conn.Read(buf[:packetLen-4])
+		count, err = io.ReadFull(conn, buf[:packetLen-4])
 		if err != nil {
 			Log.Info.Printf("Disconnected from %s: %s", peer.addr, err.Error())
 			break
@@ -316,7 +341,6 @@ func (this *PeerList) handleConnection(conn *net.TCPConn, peer *Peer, discovered
 
 		packet := bytes.NewBuffer(buf[:packetLen-4])
 
-		// TODO: we can push processing to another thread probably? need to copy bytes though?
 		if packetType == PROTO_ANNOUNCE {
 			this.handleAnnounce(peer, protocolReadAnnounce(packet), true)
 		} else if packetType == PROTO_ANNOUNCE_CONTINUE {
@@ -327,9 +351,15 @@ func (this *PeerList) handleConnection(conn *net.TCPConn, peer *Peer, discovered
 		} else if packetType == PROTO_UPLOAD_PART {
 			downloadId, part := protocolReadUploadPart(packet)
 			this.handleUploadPart(peer, downloadId, part)
+		} else if packetType == PROTO_UPLOAD_FAIL {
+			downloadId := protocolReadUploadFail(packet)
+			this.handleUploadFail(peer, downloadId)
 		} else if packetType == PROTO_DOWNLOAD {
 			downloadId, fileHash, blockIndex := protocolReadDownload(packet)
 			this.handleDownload(peer, downloadId, fileHash, blockIndex)
+		} else if packetType == PROTO_DOWNLOAD_CANCEL {
+			downloadId := protocolReadDownloadCancel(packet)
+			this.handleDownloadCancel(peer, downloadId)
 		} else {
 			Log.Info.Printf("Disconnected from %s: unknown packet type %d", peer.addr, packetType)
 			break
@@ -408,9 +438,8 @@ func (this *PeerList) handleUploadPart(peer *Peer, downloadId int64, part []byte
 
 		// updating rolling speed, but only if this was a large enough block
 		if download.Length >= BLOCK_SIZE / 4 {
-			downloadTime := time.Now().Sub(download.StartTime).Nanoseconds() / 1000 // convert to microseconds
-			timePerBlock := float64(downloadTime) * BLOCK_SIZE / float64(download.Length)
-			peer.rollingSpeed = int64(float64(peer.rollingSpeed) * 0.7 + timePerBlock * 0.3)
+			timePerBlock := float64(time.Now().Sub(download.StartTime)) * BLOCK_SIZE / float64(download.Length)
+			peer.rollingSpeed = time.Duration(float64(peer.rollingSpeed) * 0.7 + timePerBlock * 0.3)
 
 			if peer.rollingSpeed <= 0 {
 				peer.rollingSpeed = 1
@@ -419,20 +448,34 @@ func (this *PeerList) handleUploadPart(peer *Peer, downloadId int64, part []byte
 	}
 }
 
+func (this *PeerList) handleUploadFail(peer *Peer, downloadId int64) {
+	peer.mu.Lock()
+	defer peer.mu.Unlock()
+
+	download, ok := peer.pendingDownloads[downloadId]
+	if ok {
+		download.Bytes = nil
+		download.NotifyChannel <- false
+		delete(peer.pendingDownloads, downloadId)
+	}
+}
+
 func (this *PeerList) handleDownload(peer *Peer, downloadId int64, fileHash string, blockIndex int) {
-	cacheFile := this.cache.DownloadInitHash(fileHash)
-	if cacheFile == nil {
+	cacheFile, err := this.cache.DownloadInitHash(fileHash)
+	if err != nil {
 		Log.Warn.Printf("Failed to handle download from %s: cache doesn't contain file %s", peer.addr, fileHash)
+		peer.conn.Write(protocolSendUploadFail(downloadId).Bytes())
 		return
 	}
 
 	bytes := this.cache.DownloadRead(cacheFile, blockIndex, false)
 	if bytes == nil {
 		Log.Warn.Printf("Failed to handle download from %s: cache did not provide block %s/%d", peer.addr, fileHash, blockIndex)
+		peer.conn.Write(protocolSendUploadFail(downloadId).Bytes())
 		return
 	}
 
-	Log.Debug.Printf("Handling download from %s, providing block %s/%d", peer.addr, fileHash, blockIndex)
+	Log.Debug.Printf("Handling download %d from %s, providing block %s/%d", downloadId, peer.addr, fileHash, blockIndex)
 
 	go func() {
 		peer.mu.Lock()
@@ -451,6 +494,10 @@ func (this *PeerList) handleDownload(peer *Peer, downloadId int64, fileHash stri
 			peer.mu.Unlock()
 		}
 	}()
+}
+
+func (this *PeerList) handleDownloadCancel(peer *Peer, downloadId int64) {
+	// TODO
 }
 
 /*
@@ -480,7 +527,7 @@ func (this *PeerList) startDownload(peer *Peer, peerBlock PeerBlock) *PeerDownlo
 			StartTime: time.Now(),
 		}
 		peer.pendingDownloads[download.Id] = download
-		Log.Debug.Printf("Initialized download from %s (id=%d)", peer.addr, download.Id)
+		Log.Debug.Printf("Initialized download from %s (id=%d, blk=%s/%d)", peer.addr, download.Id, peerBlock.FileHash, peerBlock.Index)
 		return download
 	} else {
 		Log.Debug.Printf("Failed to initialize download from %s: peer is disconnected", peer.addr)
@@ -502,12 +549,12 @@ func (this *PeerList) cancelDownload(peer *Peer, downloadId int64) {
 /*
  * Local request (from cache) to retrieve a block from peers.
  */
-func (this *PeerList) DownloadBlock(fileHash string, blockIndex int, timeout time.Duration) []byte {
+func (this *PeerList) DownloadBlock(fileHash string, blockIndex int) []byte {
 	peerBlock := PeerBlock{FileHash: fileHash, Index: blockIndex}
-	startTime := time.Now()
+	ignorePeers := make(map[int64]bool) // set of peers that we shouldn't download from
 
-	for time.Now().Before(startTime.Add(timeout)) {
-		peer := this.findPeerWithBlock(peerBlock)
+	for attempt := 0; attempt < DOWNLOAD_MAX_ATTEMPTS; attempt++ {
+		peer := this.findPeerWithBlock(peerBlock, ignorePeers)
 		if peer == nil {
 			Log.Warn.Printf("Failed to find peer with block %s/%d", peerBlock.FileHash, peerBlock.Index)
 			return nil
@@ -515,16 +562,29 @@ func (this *PeerList) DownloadBlock(fileHash string, blockIndex int, timeout tim
 
 		download := this.startDownload(peer, peerBlock)
 		if download == nil {
+			ignorePeers[peer.peerId] = true
 			continue
+		}
+
+		timeout := peer.rollingSpeed * 4
+		if timeout < DOWNLOAD_MIN_TIMEOUT {
+			timeout = DOWNLOAD_MIN_TIMEOUT
 		}
 
 		select {
 			case <- download.NotifyChannel:
-				return download.Bytes
-			case <- time.After(timeout - time.Now().Sub(startTime)):
-				Log.Warn.Printf("Download from peer %s has timed out, failed request", peer.addr)
+				if download.Bytes != nil {
+					return download.Bytes
+				} else {
+					Log.Warn.Printf("Download from peer %s failed", peer.addr)
+					ignorePeers[peer.peerId] = true
+					continue
+				}
+			case <- time.After(timeout):
+				Log.Warn.Printf("Download from peer %s timed out", peer.addr)
 				this.cancelDownload(peer, download.Id)
-				return nil
+				ignorePeers[peer.peerId] = true
+				continue
 		}
 	}
 
@@ -535,7 +595,7 @@ func (this *PeerList) DownloadBlock(fileHash string, blockIndex int, timeout tim
  * Returns a peer who has announced the block, or nil if no such peer exists.
  * We prefer peers that have higher download speeds.
  */
-func (this *PeerList) findPeerWithBlock(peerBlock PeerBlock) *Peer {
+func (this *PeerList) findPeerWithBlock(peerBlock PeerBlock, ignorePeers map[int64]bool) *Peer {
 	// we first identify the set of peers that have the block available
 	//  (both connected and announced block recently)
 	// out of those, we select each one with probability proportional to 1/rollingSpeed
@@ -544,14 +604,13 @@ func (this *PeerList) findPeerWithBlock(peerBlock PeerBlock) *Peer {
 
 	peerWeights := make(map[*Peer]int64)
 	var totalWeight int64
-	for _, peer := range this.peers {
+	for peerId, peer := range this.peers {
 		peer.mu.Lock()
-		_, ok := peer.availableBlocks[peerBlock]
-		if ok && peer.conn != nil {
+		if peer.availableBlocks[peerBlock] && peer.conn != nil && !ignorePeers[peerId] {
 			if peer.rollingSpeed == 0 {
-				peerWeights[peer] = DEFAULT_PEER_SPEED
+				peerWeights[peer] = int64(DEFAULT_PEER_SPEED)
 			} else {
-				peerWeights[peer] = DEFAULT_PEER_SPEED * 100000 / peer.rollingSpeed
+				peerWeights[peer] = int64(DEFAULT_PEER_SPEED * 100000 / peer.rollingSpeed)
 			}
 			totalWeight += peerWeights[peer]
 		}
@@ -573,6 +632,61 @@ func (this *PeerList) findPeerWithBlock(peerBlock PeerBlock) *Peer {
 
 	Log.Error.Printf("Failed to select random peer, random number out of range?!")
 	return nil
+}
+
+// extracted from golang-geo library (https://github.com/kellydunn/golang-geo/blob/master/point.go)
+func (this *PeerList) ipDistance(record *geoip2.City, ip net.IP) float64 {
+	ipRecord, err := this.geoip.City(ip)
+	if err != nil {
+		Log.Warn.Printf("Geoip query failed: %s", err.Error())
+		return math.MaxFloat64
+	}
+
+	dLat := (record.Location.Latitude - ipRecord.Location.Latitude) * (math.Pi / 180.0)
+	dLon := (record.Location.Longitude - ipRecord.Location.Longitude) * (math.Pi / 180.0)
+	lat1 := record.Location.Latitude * (math.Pi / 180.0)
+	lat2 := ipRecord.Location.Latitude * (math.Pi / 180.0)
+	a1 := math.Sin(dLat/2) * math.Sin(dLat/2)
+	a2 := math.Sin(dLon/2) * math.Sin(dLon/2) * math.Cos(lat1) * math.Cos(lat2)
+	a := a1 + a2
+	return 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
+}
+
+/*
+ * Returns base URL of closest peer to provided IP, or empty string if we shouldn't redirect
+ */
+func (this *PeerList) findClosestPeer(clientIp net.IP) string {
+	if this.geoip == nil || this.myIP == nil {
+		return ""
+	}
+
+	record, err := this.geoip.City(clientIp)
+	if err != nil {
+		Log.Warn.Printf("Geoip query failed: %s", err.Error())
+		return ""
+	}
+
+	peerIps := make(map[string]net.IP)
+	this.mu.Lock()
+	for _, peer := range this.peers {
+		if peer.conn != nil {
+			peerIps[peer.location] = net.ParseIP(strings.Split(peer.addr, ":")[0])
+		}
+	}
+	this.mu.Unlock()
+
+	minDistance := this.ipDistance(record, this.myIP)
+	minLocation := ""
+
+	for peerLocation, peerIp := range peerIps {
+		dist := this.ipDistance(record, peerIp)
+		if dist < minDistance {
+			minDistance = dist
+			minLocation = peerLocation
+		}
+	}
+
+	return minLocation
 }
 
 func (this *PeerList) refreshPeers() {
@@ -614,24 +728,25 @@ func (this *PeerList) refreshPeer(peer *Peer) {
 
 	// try to connect to the peer if CONNECT_INTERVAL seconds has elapsed
 	// note that updating peer.conn is done in handleConnection, and only after the HELLO exchange succeeds
-	if peer.conn == nil && time.Now().After(peer.lastConnectTime.Add(CONNECT_INTERVAL)) {
+	if peer.conn == nil && !peer.connecting && time.Now().After(peer.lastConnectTime.Add(CONNECT_INTERVAL)) {
 		peer.lastConnectTime = time.Now()
+		peer.connecting = true
 
 		go func() {
+			defer func() {
+				peer.mu.Lock()
+				peer.connecting = false
+				peer.mu.Unlock()
+			}()
+
 			Log.Info.Printf("Attempting to connect to %s", peer.addr)
-			tcpAddr, err := net.ResolveTCPAddr("tcp", peer.addr)
+			nConn, err := net.DialTimeout("tcp", peer.addr, CONNECT_TIMEOUT)
 			if err != nil {
 				Log.Info.Printf("Failed to connect to %s: %s", peer.addr, err.Error())
 				return
 			}
 
-			nConn, err := net.DialTCP("tcp", nil, tcpAddr)
-			if err != nil {
-				Log.Info.Printf("Failed to connect to %s: %s", peer.addr, err.Error())
-				return
-			}
-
-			go this.handleConnection(nConn, peer, "")
+			this.handleConnection(nConn.(*net.TCPConn), peer, "")
 		}()
 	}
 
@@ -644,7 +759,7 @@ func (this *PeerList) refreshPeer(peer *Peer) {
 			peer.mu.Lock()
 			defer peer.mu.Unlock()
 			if peer.conn != nil {
-				Log.Debug.Printf("Announcing %d blocks to %s", len(announceFiles), peer.addr)
+				Log.Debug.Printf("Announcing %d files to %s", len(announceFiles), peer.addr)
 				for _, buf := range protocolSendAnnounce(announceFiles) {
 					peer.conn.Write(buf.Bytes())
 				}

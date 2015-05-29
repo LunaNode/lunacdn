@@ -12,6 +12,12 @@ func main() {
 
 	lunacdn.InitLogging(os.Stdout, os.Stdout, os.Stdout, os.Stderr)
 	cfg := lunacdn.LoadConfig(os.Args[1])
-	cache := lunacdn.MakeCache(cfg, nil)
+
+	if cfg.CacheAsFile {
+		fmt.Println("cacheAsFile enabled in configuration file, registerfile not needed?")
+		os.Exit(-1)
+	}
+
+	cache := lunacdn.MakeObjCache(cfg, nil)
 	cache.RegisterFile(os.Args[2], os.Args[3])
 }
