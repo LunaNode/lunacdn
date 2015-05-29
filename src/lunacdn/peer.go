@@ -37,6 +37,7 @@ import "encoding/binary"
 import "math"
 import "math/rand"
 import "bytes"
+import "io"
 import "github.com/oschwald/geoip2-golang"
 
 /*
@@ -313,7 +314,7 @@ func (this *PeerList) handleConnection(conn *net.TCPConn, peer *Peer, discovered
 
 	for {
 		conn.SetReadDeadline(time.Now().Add(2 * ANNOUNCE_INTERVAL)) // timeout to detect disconnects
-		count, err := conn.Read(header)
+		count, err := io.ReadFull(conn, header)
 		if err != nil {
 			Log.Info.Printf("Disconnected from %s: %s", peer.addr, err.Error())
 			break
@@ -329,7 +330,7 @@ func (this *PeerList) handleConnection(conn *net.TCPConn, peer *Peer, discovered
 
 		packetType := header[1]
 		packetLen := binary.BigEndian.Uint16(header[2:4])
-		count, err = conn.Read(buf[:packetLen-4])
+		count, err = io.ReadFull(conn, buf[:packetLen-4])
 		if err != nil {
 			Log.Info.Printf("Disconnected from %s: %s", peer.addr, err.Error())
 			break
