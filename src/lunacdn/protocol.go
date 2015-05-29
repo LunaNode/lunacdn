@@ -241,7 +241,7 @@ func protocolSendAnnounce(files []AnnounceFile) []*bytes.Buffer {
 		}
 	}
 
-	if currentNumFiles > 0 {
+	if currentNumFiles > 0 || len(packets) == 0 {
 		buf := new(bytes.Buffer)
 		buf.WriteByte(HEADER_CONSTANT)
 		if len(packets) == 0 {
