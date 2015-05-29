@@ -733,6 +733,12 @@ func (this *PeerList) refreshPeer(peer *Peer) {
 		peer.connecting = true
 
 		go func() {
+			defer func() {
+				peer.mu.Lock()
+				peer.connecting = false
+				peer.mu.Unlock()
+			}()
+
 			Log.Info.Printf("Attempting to connect to %s", peer.addr)
 			nConn, err := net.DialTimeout("tcp", peer.addr, CONNECT_TIMEOUT)
 			if err != nil {
@@ -741,10 +747,6 @@ func (this *PeerList) refreshPeer(peer *Peer) {
 			}
 
 			this.handleConnection(nConn.(*net.TCPConn), peer, "")
-
-			peer.mu.Lock()
-			peer.connecting = false
-			peer.mu.Unlock()
 		}()
 	}
 
