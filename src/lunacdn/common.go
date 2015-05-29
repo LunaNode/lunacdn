@@ -54,6 +54,9 @@ const DOWNLOAD_MAX_ATTEMPTS = 3
 // minimum timeout for block download from peer
 const DOWNLOAD_MIN_TIMEOUT = time.Second
 
+// connection timeout
+const CONNECT_TIMEOUT = 5 * time.Second
+
 const HEXADECIMAL_CHARS = "0123456789abcdef"
 
 func randSeq(n int) string {

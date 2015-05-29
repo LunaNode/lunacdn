@@ -83,6 +83,7 @@ type Peer struct {
 	lastAnnounceTime time.Time
 	peerId int64
 	location string
+	connecting bool // whether currently connecting
 
 	// set of blocks this peer advertises
 	availableBlocks map[PeerBlock]bool
@@ -235,6 +236,7 @@ func (this *PeerList) handleConnection(conn *net.TCPConn, peer *Peer, discovered
 	}
 
 	conn.Write(protocolSendHello(this.peerId, this.myLocation).Bytes())
+	conn.SetReadDeadline(time.Now().Add(CONNECT_TIMEOUT))
 	helloSuccess, helloPeerId, helloPeerLocation := protocolReadHello(conn)
 	if !helloSuccess {
 		return
@@ -725,24 +727,23 @@ func (this *PeerList) refreshPeer(peer *Peer) {
 
 	// try to connect to the peer if CONNECT_INTERVAL seconds has elapsed
 	// note that updating peer.conn is done in handleConnection, and only after the HELLO exchange succeeds
-	if peer.conn == nil && time.Now().After(peer.lastConnectTime.Add(CONNECT_INTERVAL)) {
+	if peer.conn == nil && !peer.connecting && time.Now().After(peer.lastConnectTime.Add(CONNECT_INTERVAL)) {
 		peer.lastConnectTime = time.Now()
+		peer.connecting = true
 
 		go func() {
 			Log.Info.Printf("Attempting to connect to %s", peer.addr)
-			tcpAddr, err := net.ResolveTCPAddr("tcp", peer.addr)
+			nConn, err := net.DialTimeout("tcp", peer.addr, CONNECT_TIMEOUT)
 			if err != nil {
 				Log.Info.Printf("Failed to connect to %s: %s", peer.addr, err.Error())
 				return
 			}
 
-			nConn, err := net.DialTCP("tcp", nil, tcpAddr)
-			if err != nil {
-				Log.Info.Printf("Failed to connect to %s: %s", peer.addr, err.Error())
-				return
-			}
+			this.handleConnection(nConn.(*net.TCPConn), peer, "")
 
-			go this.handleConnection(nConn, peer, "")
+			peer.mu.Lock()
+			peer.connecting = false
+			peer.mu.Unlock()
 		}()
 	}
 
